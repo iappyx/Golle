@@ -66,7 +66,7 @@ enum Tests {
         var full = Record()
         full.values = [
             id(.text): .text("Kind of Blue"), id(.longText): .text("Line one\nLine two"), id(.number): .number(1959.5),
-            id(.date): .date(Date(timeIntervalSince1970: 1_000_000)), id(.checkbox): .bool(true),
+            id(.date): .date(sampleDate), id(.checkbox): .bool(true),
             id(.choice): .choices(["Jazz"]), id(.multiChoice): .choices(["Jazz", "Folk"]), id(.rating): .rating(4),
             id(.url): .text("https://example.com/ü?a=1&b=2"),
             id(.image): .attachments([Attachment(name: "cover.png")]), id(.file): .attachments([Attachment(name: "notes.pdf")]),
@@ -155,7 +155,8 @@ enum Tests {
                 return [c.year, c.month, c.day]
             }
             TestRunner.equal(day("2024-03-05"), [2024, 3, 5], "ISO date")
-            TestRunner.equal(day("05-03-2024"), [2024, 3, 5], "day-month-year")
+            // Day or month first as this Mac's region writes them (GitHub's machines are set to the US).
+            TestRunner.equal(day("05-03-2024"), Value.localeDateOrder == .monthDayYear ? [2024, 5, 3] : [2024, 3, 5], "05-03-2024 in the region's order")
             TestRunner.equal(day("31/12/1999"), [1999, 12, 31], "day/month/year")
             let date = Value.date(Calendar.current.startOfDay(for: Date(timeIntervalSince1970: 1_000_000)))
             TestRunner.equal(date.converted(to: .text)?.converted(to: .date), date, "date survives a trip through text")
@@ -608,6 +609,10 @@ enum Tests {
         }
     }
 
+    /// The sample records' date: noon on 12 January 1970 wherever the tests run, so it is that day in
+    /// every time zone (a fixed moment is the 13th in New Zealand).
+    static let sampleDate = Calendar.current.date(from: DateComponents(year: 1970, month: 1, day: 12, hour: 12))!
+
     private static func exporting() {
         TestRunner.suite("Export") {
             let db = sample()
@@ -949,7 +954,7 @@ enum Tests {
                 let row = Dictionary(uniqueKeysWithValues: zip(rows[0], rows[1]))
                 TestRunner.equal(row["Text"], "Kind of Blue", "text")
                 TestRunner.equal(row["Number"], "1959.5", "number")
-                TestRunner.equal(row["Date"], Date(timeIntervalSince1970: 1_000_000).formatted(Value.isoDay), "date comes back as a date")
+                TestRunner.equal(row["Date"], sampleDate.formatted(Value.isoDay), "date comes back as a date")
                 TestRunner.equal(row["Checkbox"], "Yes", "boolean")
                 TestRunner.equal(row["Rating"], "4", "rating as a number")
                 TestRunner.equal(row["Long Text"], "Line one\nLine two", "newlines survive")
