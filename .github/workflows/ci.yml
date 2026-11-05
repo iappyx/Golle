@@ -1,0 +1,26 @@
+# Builds Golle and runs its tests on every push to main and every pull request.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    # Golle targets macOS 27: the Xcode 27 image runs macOS 27 on Apple Silicon.
+    runs-on: xcode-27
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: sw_vers && swift --version && xcrun --show-sdk-version
+
+      - name: Icon
+        run: test -f Resources/AppIcon.icns || scripts/make-icon.sh
+
+      - name: Bundle app (ad-hoc signed)
+        run: scripts/build-app.sh release
+
+      - name: Unit tests
+        run: build/Golle.app/Contents/MacOS/Golle --test

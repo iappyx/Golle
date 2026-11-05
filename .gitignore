@@ -1,0 +1,41 @@
+# Build output
+.build/
+build/
+*.app
+*.zip
+*.dSYM/
+.swiftpm/
+DerivedData/
+*.xcuserdata*
+
+# macOS
+.DS_Store
+._*
+
+# Local session shortcuts, assistant state and private notes
+PLAN.md
+claude-session.sh
+start_session.sh
+.claude/
+
+# Databases made while testing or rendering screenshots (the demo is generated, never committed)
+*.golledb/
+*.golledb
+
+# Never, whatever happens: secrets, signing material and credentials.
+.env
+.env.*
+*.pem
+*.key
+*.p8
+*.p12
+*.pfx
+*.cer
+*.certSigningRequest
+*.mobileprovision
+*.provisionprofile
+*.keychain
+*.keychain-db
+.netrc
+notary*.json
+AuthKey_*.p8

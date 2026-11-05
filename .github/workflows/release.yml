@@ -1,0 +1,89 @@
+# Builds Golle.app on GitHub's macOS runners.
+# - Push a tag like v1.2.3: builds that version, runs the tests and publishes it as a GitHub Release
+#   with a zip.
+# - Run it by hand (Actions tab -> Release -> Run workflow): builds a test zip, downloadable from
+#   the run page. Nothing is published.
+# The app is ad-hoc signed (no Apple developer account), so users confirm it once via "Open Anyway".
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to create the release
+
+jobs:
+  build:
+    # Golle targets macOS 27: the Xcode 27 image runs macOS 27 on Apple Silicon.
+    runs-on: xcode-27
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set version
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=0.0.0-test" >> "$GITHUB_ENV"
+          fi
+
+      - name: Icon
+        run: test -f Resources/AppIcon.icns || scripts/make-icon.sh
+
+      - name: Build Golle.app
+        run: scripts/build-app.sh release
+
+      - name: Unit tests
+        run: build/Golle.app/Contents/MacOS/Golle --test
+
+      - name: Check the binary carries no build paths
+        run: |
+          if strings build/Golle.app/Contents/MacOS/Golle | grep -q "/Users/"; then
+            echo "::error::the built binary still contains /Users/ paths"
+            strings build/Golle.app/Contents/MacOS/Golle | grep "/Users/" | head
+            exit 1
+          fi
+          echo "clean: no absolute build paths in the binary"
+
+      - name: Zip
+        run: ditto -c -k --keepParent build/Golle.app "Golle-$VERSION.zip"
+
+      - name: Upload test build
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Golle-${{ env.VERSION }}
+          path: Golle-${{ env.VERSION }}.zip
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<EOF
+          A free personal database for macOS. For Macs with Apple Silicon, macOS 27 or newer.
+
+          **Install:** download \`Golle-$VERSION.zip\`, unzip it, and drag **Golle.app** to your Applications folder.
+
+          **First launch:** Golle is not notarized by Apple, so macOS blocks it the first time and says it
+          cannot verify the developer. Click **Done**, then open **System Settings → Privacy & Security**,
+          scroll down to Security, and click **Open Anyway** next to Golle. Confirm once and it opens
+          normally from then on.
+
+          **After an update:** each build has its own signature, so a database you unlock with Touch ID may
+          ask for its password once (or macOS asks whether Golle may use its Keychain entry). Allow it, and
+          Touch ID works again.
+
+          Everything stays on your Mac: no accounts, no sync, no telemetry. The network is only used when
+          you look up a barcode or find a place on the map.
+          EOF
+          # A release made on GitHub's website (which creates the tag) gets the zip added; otherwise
+          # the release is made here.
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "Golle-$VERSION.zip" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "Golle-$VERSION.zip" \
+              --title "Golle $VERSION" --notes-file notes.md
+          fi
