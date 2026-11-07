@@ -74,7 +74,7 @@ struct DatabaseCommands: Commands {
                 if let url = Exporting.chooseImportFile() { actions?.importFile(url) }
             }
             .keyboardShortcut("i", modifiers: [.command, .shift])
-            .disabled(table == nil)
+            .disabled(table == nil || actions?.sheetOpen == true)
             Menu("Export") {
                 Button("CSV (Records in View)…") {
                     if let document, let actions { Exporting.exportCSV(document: document, records: actions.visibleRecords()) }
@@ -102,13 +102,13 @@ struct DatabaseCommands: Commands {
                 if let document, let actions { Exporting.print(document: document, records: actions.visibleRecords()) }
             }
             .keyboardShortcut("p")
-            .disabled(table == nil)
+            .disabled(table == nil || actions?.sheetOpen == true)
             Button("Print Report…") { actions?.report() }
                 .keyboardShortcut("p", modifiers: [.command, .option])
-                .disabled(table == nil)
+                .disabled(table == nil || actions?.sheetOpen == true)
             Button("Print Labels or Cards…") { actions?.labels() }
                 .keyboardShortcut("p", modifiers: [.command, .shift])
-                .disabled(table == nil)
+                .disabled(table == nil || actions?.sheetOpen == true)
         }
 
         CommandGroup(before: .sidebar) {
@@ -140,6 +140,11 @@ struct DatabaseCommands: Commands {
             .keyboardShortcut("d", modifiers: .command)
             .disabled(table == nil || document?.selectedRecordIDs.isEmpty != false)
 
+            // The column of the cell last clicked into, from the topmost selected record down.
+            Button("Fill Down") { actions?.fillDown() }
+                .keyboardShortcut("d", modifiers: [.command, .shift])
+                .disabled(table == nil || (document?.selectedRecordIDs.count ?? 0) < 2)
+
             // No ⌘⌫ shortcut: menu shortcuts win over text fields, where ⌘⌫ deletes to the start of
             // the line. The Delete key deletes records in the table and gallery.
             Button("Delete Record") {
@@ -151,12 +156,12 @@ struct DatabaseCommands: Commands {
 
             Button("Scan Barcode…") { actions?.scanner() }
                 .keyboardShortcut("b", modifiers: [.command, .shift])
-                .disabled(table == nil)
+                .disabled(table == nil || actions?.sheetOpen == true)
             Button("Find Duplicates…") { actions?.duplicates() }
-                .disabled(table == nil)
+                .disabled(table == nil || actions?.sheetOpen == true)
             Button("Find and Replace…") { actions?.findReplace() }
                 .keyboardShortcut("f", modifiers: [.command, .option])
-                .disabled(table == nil)
+                .disabled(table == nil || actions?.sheetOpen == true)
 
             Divider()
 
@@ -165,20 +170,21 @@ struct DatabaseCommands: Commands {
                 .disabled(document == nil || document?.isLocked == true)
             Button("Edit Fields…") { actions?.editFields() }
                 .keyboardShortcut("e", modifiers: [.command, .shift])
-                .disabled(table == nil)
+                .disabled(table == nil || actions?.sheetOpen == true)
+            // Not ⌃⌘S: that shows and hides the sidebar.
             Button("Save View…") { actions?.saveView() }
-                .keyboardShortcut("s", modifiers: [.command, .control])
-                .disabled(table == nil)
+                .keyboardShortcut("s", modifiers: [.command, .option])
+                .disabled(table == nil || actions?.sheetOpen == true)
             Button("Colour Rules…") { actions?.colorRules() }
                 .keyboardShortcut("k", modifiers: [.command, .shift])
-                .disabled(table == nil)
+                .disabled(table == nil || actions?.sheetOpen == true)
             Button("Duplicate Table") { if let document, let table { document.duplicateTable(table) } }
                 .disabled(table == nil)
 
             Divider()
 
             Button("Appearance & Password…") { actions?.settings() }
-                .disabled(document == nil || document?.isLocked == true)
+                .disabled(document == nil || document?.isLocked == true || actions?.sheetOpen == true)
         }
     }
 }

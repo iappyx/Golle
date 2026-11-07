@@ -108,8 +108,10 @@ struct LabelsSheet: View {
                 Button("Save PDF…") { if let data = pdf() { Exporting.save(data, name: "\(table?.name ?? "Labels") labels.pdf", type: .pdf) } }
                 Button("Print…") {
                     if let data = pdf() {
+                        let title = "\(table?.name ?? "Golle") labels"
                         dismiss()
-                        Printing.print(data, title: "\(table?.name ?? "Golle") labels", exactSize: true)
+                        // After the sheet has gone: the print panel opens on the document window.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { Printing.print(data, title: title, exactSize: true) }
                     }
                 }
                 .keyboardShortcut(.defaultAction)

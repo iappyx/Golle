@@ -251,10 +251,16 @@ struct ChartControls: View {
     var body: some View {
         let category = settings.categoryField(table)
         HStack(spacing: 10) {
-            Picker("Chart", selection: $settings.kind) {
-                ForEach(ChartSettings.Kind.allCases) { Label($0.label, systemImage: $0.symbol).tag($0) }
+            // A button per kind, each with its own tooltip (segments of a picker share one).
+            ControlGroup {
+                ForEach(ChartSettings.Kind.allCases) { kind in
+                    Toggle(isOn: Binding(get: { settings.kind == kind }, set: { if $0 { settings.kind = kind } })) {
+                        Label(kind.label, systemImage: kind.symbol)
+                    }
+                    .toggleStyle(.button)
+                    .help(kind.label)
+                }
             }
-            .pickerStyle(.segmented)
             .labelStyle(.iconOnly)
             .fixedSize()
             Picker("By", selection: Binding(get: { category?.id }, set: { settings.categoryFieldID = $0 })) {
@@ -381,7 +387,8 @@ struct DashboardView: View {
                                     Divider()
                                     Button("Remove", role: .destructive) { document.removeTile(tile.id) }
                                 }
-                                .onTapGesture(count: 2) { editing = tile }
+                                // Beside the chart's own clicks (which pick a bar or a slice), not under them.
+                                .simultaneousGesture(TapGesture(count: 2).onEnded { editing = tile })
                         }
                     }
                     .padding(16)

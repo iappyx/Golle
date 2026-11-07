@@ -11,6 +11,8 @@ struct ScannerSheet: View {
 
     @StateObject private var camera = BarcodeCamera()
     @State private var code = ""
+    /// Typing a code: the camera doesn't overwrite it.
+    @FocusState private var typing: Bool
     @State private var results: [LookupResult] = []
     @State private var searching = false
     @State private var message: String?
@@ -58,6 +60,8 @@ struct ScannerSheet: View {
                 return
             }
             lastSeen = Date()
+            // Something being typed in the field stays; the camera waits.
+            if typing, !code.isEmpty { return }
             code = detected
             look()
         }
@@ -90,6 +94,7 @@ struct ScannerSheet: View {
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
                 TextField("Or type an ISBN or barcode", text: $code)
+                    .focused($typing)
                     .onSubmit(look)
                 Button("Look Up", action: look).disabled(Lookup.clean(code).count < 8 || searching || !onlineLookups)
             }

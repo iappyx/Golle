@@ -6,6 +6,13 @@ import SwiftUI
 struct RichTextEditor: View {
     @Binding var markdown: String
     var minHeight: CGFloat = 90
+    /// Puts the cursor in the text as soon as it shows (a popover opened from the keyboard), with
+    /// what was typed to open it.
+    var focusOnAppear = false
+    var typed: String?
+    /// Escape in the text: closes the editor it is in (a popover). Without it, Escape is the text
+    /// view's own (word completion).
+    var onEscape: (() -> Void)?
     @State private var controller = RichTextController()
 
     var body: some View {
@@ -34,7 +41,7 @@ struct RichTextEditor: View {
             }
             .buttonStyle(.borderless)
             .controlSize(.small)
-            RichTextView(markdown: $markdown, controller: controller)
+            RichTextView(markdown: $markdown, controller: controller, focusOnAppear: focusOnAppear, typed: typed, onEscape: onEscape)
                 .frame(minHeight: minHeight)
                 .padding(4)
                 .background(Color(nsColor: .textBackgroundColor), in: .rect(cornerRadius: 5))
@@ -195,6 +202,9 @@ final class RichTextController {
 struct RichTextView: NSViewRepresentable {
     @Binding var markdown: String
     let controller: RichTextController
+    var focusOnAppear = false
+    var typed: String?
+    var onEscape: (() -> Void)?
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -237,6 +247,10 @@ struct RichTextView: NSViewRepresentable {
         context.coordinator.textView = text
         controller.textView = text
         controller.onChange = { [weak coordinator = context.coordinator] in coordinator?.edited() }
+        // Opened from the keyboard: the editor takes the keyboard as soon as it is in its window.
+        text.focusWhenShown = focusOnAppear
+        text.typedWhenShown = typed
+        text.onEscape = onEscape
         return scroll
     }
 
@@ -377,6 +391,31 @@ struct RichTextView: NSViewRepresentable {
 /// don't fight over the shortcut.
 final class FormattingTextView: NSTextView {
     weak var controller: RichTextController?
+    /// Take the keyboard once in a window (an editor opened from the keyboard), and type this.
+    var focusWhenShown = false
+    var typedWhenShown: String?
+    var onEscape: (() -> Void)?
+
+    override func cancelOperation(_ sender: Any?) {
+        if let onEscape { onEscape() } else { super.cancelOperation(sender) }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard focusWhenShown, window != nil else { return }
+        focusWhenShown = false
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let window = self.window else { return }
+            window.makeKey()
+            window.makeFirstResponder(self)
+            // The cursor after the text, then what was typed to open the editor.
+            self.setSelectedRange(NSRange(location: self.string.utf16.count, length: 0))
+            if let typed = self.typedWhenShown, !typed.isEmpty {
+                self.insertText(typed, replacementRange: self.selectedRange())
+            }
+            self.typedWhenShown = nil
+        }
+    }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard window?.firstResponder === self, event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,

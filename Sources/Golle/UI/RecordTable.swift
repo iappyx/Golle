@@ -1,209 +1,5 @@
 import SwiftUI
 
-/// The records as a sortable grid, edited in place. One column per field; click a header to sort.
-/// With grouping, records sit under collapsible group rows that show counts and totals.
-struct RecordTable: View {
-    @ObservedObject var document: GolleDocument
-    let table: DataTable
-    let rows: [Record]
-    let resolver: Resolver
-    let groupFields: [Field]
-    /// The view's visible fields, as columns.
-    let fields: [Field]
-    @Binding var sort: [SortKey]
-    /// Column order and widths, saved with the view.
-    @Binding var columns: TableColumnCustomization<Row>
-    @State private var collapsed = Set<String>()
-
-    enum Row: Identifiable {
-        case record(Record)
-        case group(RecordGroup)
-
-        var id: String {
-            switch self {
-            case .record(let r): r.id.uuidString
-            case .group(let g): "group:" + g.id
-            }
-        }
-    }
-
-    private var groups: [RecordGroup] { Grouping.groups(rows, by: groupFields, resolver) }
-
-    /// The record shown last (grouping changes the order on screen): Return there adds a record.
-    private var lastShownID: Record.ID? {
-        guard !groupFields.isEmpty else { return rows.last?.id }
-        // The last record that can be seen: collapsed groups hide theirs.
-        func last(_ groups: [RecordGroup]) -> Record.ID? {
-            for group in groups.reversed() where !collapsed.contains(group.id) {
-                if let id = group.subgroups.isEmpty ? group.records.last?.id : last(group.subgroups) { return id }
-            }
-            return nil
-        }
-        return last(groups)
-    }
-
-    private var selection: Binding<Set<String>> {
-        Binding(
-            get: { Set(document.selectedRecordIDs.map(\.uuidString)) },
-            set: { ids in
-                // Only a real change: writing back the same selection while the table is updating
-                // makes it update again from inside itself.
-                let new = Set(ids.compactMap(UUID.init(uuidString:)))
-                if new != document.selectedRecordIDs { document.selectedRecordIDs = new }
-            }
-        )
-    }
-
-    var body: some View {
-        Table(of: Row.self, selection: selection, sortOrder: sortOrder, columnCustomization: $columns) {
-            TableColumnForEach(fields) { field in
-                TableColumn(field.name, sortUsing: RowSort(fieldID: field.id)) { (row: Row) in
-                    RowCell(document: document, table: table, field: field, row: row, resolver: resolver,
-                            lastID: lastShownID, isFirst: field.id == fields.first?.id)
-                }
-                .width(min: 50, ideal: idealWidth(field))
-                .customizationID(field.id.uuidString)
-                // Which fields show is the view's "Fields" menu, so the header menu doesn't hide columns.
-                .disabledCustomizationBehavior(.visibility)
-            }
-        } rows: {
-            tableRows
-        }
-        .contextMenu(forSelectionType: String.self) { ids in
-            let records = Set(ids.compactMap(UUID.init(uuidString:)))
-            if !records.isEmpty {
-                Button("Duplicate") { document.duplicateRecords(records, in: table.id) }
-                Button(records.count == 1 ? "Delete Record" : "Delete \(records.count) Records", role: .destructive) {
-                    document.deleteRecords(records, from: table.id)
-                }
-            } else {
-                Button("New Record") { document.addRecord(to: table.id) }
-                if !collapsed.isEmpty { Button("Expand All Groups") { collapsed = [] } }
-            }
-        }
-        .onDeleteCommand { document.deleteRecords(document.selectedRecordIDs, from: table.id) }
-    }
-
-    private var sortOrder: Binding<[RowSort]> {
-        Binding(get: { sort.map { RowSort(fieldID: $0.fieldID, order: $0.ascending ? .forward : .reverse) } },
-                set: { sort = $0.map { SortKey(fieldID: $0.fieldID, ascending: $0.order == .forward) } })
-    }
-
-    /// The column header's sort state. Golle sorts the rows itself (formulas, links and groups need
-    /// the whole database), so this only carries which field and which direction.
-    struct RowSort: SortComparator, Hashable {
-        var fieldID: Field.ID
-        var order: SortOrder = .forward
-        func compare(_ lhs: Row, _ rhs: Row) -> ComparisonResult { .orderedSame }
-    }
-
-    @TableRowBuilder<Row>
-    private var tableRows: some TableRowContent<Row> {
-        if groupFields.isEmpty {
-            ForEach(rows) { record in
-                TableRow(Row.record(record))
-            }
-        } else {
-            ForEach(groups) { group in
-                groupRow(group)
-            }
-        }
-    }
-
-    private func groupRow(_ group: RecordGroup) -> some TableRowContent<Row> {
-        DisclosureTableRow(Row.group(group), isExpanded: expanded(group.id)) {
-            ForEach(group.subgroups) { sub in
-                DisclosureTableRow(Row.group(sub), isExpanded: expanded(sub.id)) {
-                    ForEach(sub.records) { record in
-                        TableRow(Row.record(record))
-                    }
-                }
-            }
-            // With one level of grouping the records sit directly under the group.
-            ForEach(group.subgroups.isEmpty ? group.records : []) { record in
-                TableRow(Row.record(record))
-            }
-        }
-    }
-
-    private func expanded(_ id: String) -> Binding<Bool> {
-        Binding(get: { !collapsed.contains(id) }, set: { if $0 { collapsed.remove(id) } else { collapsed.insert(id) } })
-    }
-
-    private func idealWidth(_ field: Field) -> CGFloat {
-        switch field.type {
-        case .checkbox: 64
-        case .rating, .number, .autoNumber, .duration, .color: 110
-        case .date: field.options.includesTime ? 160 : 110
-        case .progress: 140
-        case .createdAt, .modifiedAt: 150
-        case .longText: 260
-        case .image: 70
-        default: 170
-        }
-    }
-}
-
-/// One cell of the grouped or plain table.
-private struct RowCell: View {
-    @ObservedObject var document: GolleDocument
-    let table: DataTable
-    let field: Field
-    let row: RecordTable.Row
-    let resolver: Resolver
-    let lastID: Record.ID?
-    let isFirst: Bool
-
-    var body: some View {
-        switch row {
-        case .record(let record):
-            let problem = resolver.hasRules ? resolver.ruleProblem(record, field) : nil
-            HStack(spacing: 4) {
-                if isFirst, let color = table.color(of: record, resolver) {
-                    RoundedRectangle(cornerRadius: 2).fill(color.color).frame(width: 4)
-                        .help("Colour rule")
-                }
-                EditableCell(document: document, table: table, field: field, record: record, resolver: resolver,
-                             isLast: record.id == lastID)
-                if let problem {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                        .help("\(field.name): \(problem.message)")
-                }
-            }
-            .background(problem == nil ? Color.clear : Color.orange.opacity(0.14), in: .rect(cornerRadius: 3))
-        case .group(let group):
-            GroupCell(table: table, field: field, group: group, resolver: resolver, isFirst: isFirst)
-        }
-    }
-}
-
-/// A group row: the group's name and count in the first column, totals under their fields.
-private struct GroupCell: View {
-    let table: DataTable
-    let field: Field
-    let group: RecordGroup
-    let resolver: Resolver
-    let isFirst: Bool
-
-    var body: some View {
-        if isFirst {
-            HStack(spacing: 6) {
-                Text(group.title).fontWeight(.semibold).lineLimit(1)
-                Text("\(group.records.count)").foregroundStyle(.secondary).monospacedDigit()
-            }
-        } else if let item = table.summaries.first(where: { $0.fieldID == field.id }) {
-            Text(item.kind.compute(group.records.map { resolver.value($0, field) }, field: resolver.formatField(field)))
-                .foregroundStyle(.secondary)
-                .fontWeight(.medium)
-                .monospacedDigit()
-                .frame(maxWidth: .infinity, alignment: field.type.isNumeric || field.type == .formula || field.type == .rollup || field.type == .lookup ? .trailing : .leading)
-                .help("\(item.kind.label) of \(field.name)")
-        }
-    }
-}
-
 /// A cell that edits in place where the type allows it; the rest show their value and are edited
 /// in the inspector.
 struct EditableCell: View {
@@ -213,23 +9,30 @@ struct EditableCell: View {
     let record: Record
     let resolver: Resolver
     var isLast = false
+    @Environment(\.cellActions) private var cellActions
 
     private var value: Value? { record[field.id] }
 
     private func set(_ value: Value?) {
+        cellActions?.focused(record.id, field.id)
         document.setValue(value, record: record.id, field: field.id, table: table.id)
+    }
+
+    private var focus: () -> Void { { cellActions?.focused(record.id, field.id) } }
+    private var pasteBlock: ((String) -> Void)? {
+        cellActions.map { actions in { text in actions.pasteBlock(record.id, field.id, text) } }
     }
 
     var body: some View {
         switch field.type {
         case .text, .url, .email, .phone:
             TextCell(field: field, value: value?.text, commit: { set($0.isEmpty ? nil : .text($0)) },
-                     submit: { if isLast { document.addRecord(to: table.id) } })
+                     submit: { if isLast { document.addRecord(to: table.id) } }, focus: focus, pasteBlock: pasteBlock)
         case .barcode:
             TextCell(field: field, value: value?.text, commit: { set(Value.text($0).converted(to: .barcode)) },
-                     submit: { if isLast { document.addRecord(to: table.id) } })
+                     submit: { if isLast { document.addRecord(to: table.id) } }, focus: focus, pasteBlock: pasteBlock)
         case .number:
-            NumberCell(field: field, value: value?.number) { set($0.map(Value.number)) }
+            NumberCell(field: field, value: value?.number, commit: { set($0.map(Value.number)) }, focus: focus, pasteBlock: pasteBlock)
         case .duration:
             DurationInput(field: field, value: Binding(get: { value }, set: set), plain: true)
         case .progress:
@@ -286,6 +89,9 @@ private struct TextCell: View {
     let value: String?
     let commit: (String) -> Void
     let submit: () -> Void
+    var focus: () -> Void = {}
+    /// Pastes a block of cells from here; without it, a pasted block stays in this cell on one line.
+    var pasteBlock: ((String) -> Void)?
     @State private var draft = ""
     /// The value the draft started from.
     @State private var base = ""
@@ -308,7 +114,13 @@ private struct TextCell: View {
                 if !focused || draft == base { draft = new ?? "" }
                 base = new ?? ""
             }
-            .onChange(of: focused) { _, isFocused in if !isFocused { save() } }
+            .onChange(of: focused) { _, isFocused in if isFocused { focus() } else { save() } }
+            .onChange(of: draft) { old, new in
+                if let block = CellPasting.block(old: old, new: new) {
+                    draft = old
+                    if let pasteBlock { pasteBlock(block) } else { draft = CellPasting.oneLine(new) }
+                }
+            }
             .onDisappear { if focused { save() } }
     }
 
@@ -322,6 +134,8 @@ private struct NumberCell: View {
     let field: Field
     let value: Double?
     let commit: (Double?) -> Void
+    var focus: () -> Void = {}
+    var pasteBlock: ((String) -> Void)?
     @State private var draft = ""
     @State private var base = ""
     @FocusState private var focused: Bool
@@ -348,7 +162,13 @@ private struct NumberCell: View {
             if !focused || draft == base { draft = new.map(Value.plain) ?? "" }
             base = new.map(Value.plain) ?? ""
         }
-        .onChange(of: focused) { _, isFocused in if !isFocused { save() } }
+        .onChange(of: focused) { _, isFocused in if isFocused { focus() } else { save() } }
+        .onChange(of: draft) { old, new in
+            if let block = CellPasting.block(old: old, new: new) {
+                draft = old
+                if let pasteBlock { pasteBlock(block) } else { draft = CellPasting.oneLine(new) }
+            }
+        }
         .onDisappear { if focused { save() } }
     }
 
@@ -494,5 +314,38 @@ private struct LinkCell: View {
                            value: Binding(get: { stored }, set: set)) { picking = false }
             }
         }
+    }
+}
+
+/// What the table does when a cell is clicked into or a block of cells is pasted into one.
+struct CellActions {
+    /// A cell was clicked into or changed: pasting into the table starts in its column.
+    var focused: (Record.ID, Field.ID) -> Void
+    /// A block of cells (tabs, lines) was pasted into a cell being edited.
+    var pasteBlock: (Record.ID, Field.ID, String) -> Void
+}
+
+extension EnvironmentValues {
+    @Entry var cellActions: CellActions? = nil
+}
+
+/// Telling a pasted block from typing: a cell's text can only get a tab or a line break by pasting
+/// (Tab and Return move on).
+enum CellPasting {
+    /// The pasted block, when the new text has one the old didn't: the clipboard as it is when it
+    /// is what was pasted, else the new text.
+    static func block(old: String, new: String) -> String? {
+        guard CellClipboard.isBlock(new), !CellClipboard.isBlock(old) else { return nil }
+        if let clip = NSPasteboard.general.string(forType: .string), CellClipboard.isBlock(clip) {
+            var trimmed = clip
+            while trimmed.hasSuffix("\n") || trimmed.hasSuffix("\r") { trimmed.removeLast() }
+            if new.contains(trimmed) { return clip }
+        }
+        return new
+    }
+
+    /// Text for one cell: tabs and line breaks become spaces.
+    static func oneLine(_ text: String) -> String {
+        text.split(whereSeparator: { $0 == "\t" || $0 == "\n" || $0 == "\r" }).joined(separator: " ")
     }
 }

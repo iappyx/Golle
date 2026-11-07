@@ -1,5 +1,6 @@
 import PDFKit
 import AppKit
+import SwiftUI
 import Foundation
 
 /// Unit tests for the parts that are easy to get subtly wrong: the file format, value conversion,
@@ -53,6 +54,10 @@ enum Tests {
         settings()
         lookupsAndRules()
         findReplaceTimelineReports()
+        copyPasteRelated()
+        grid()
+        gridInWindow()
+        summaryTable()
     }
 
     /// A database with one of every field type.
@@ -277,6 +282,23 @@ enum Tests {
             }
             func value(_ formula: String) -> Value? { eval(formula).value }
             TestRunner.equal(value("{Price} * {Quantity}"), .number(10), "multiply fields")
+            // Text pieces, finding, replacing, dates as text, and SWITCH.
+            TestRunner.equal(value("MID(\"Golle\", 2, 3)"), .text("oll"), "MID counts from 1")
+            TestRunner.equal(value("MID(\"Golle\", 4, 10)"), .text("le"), "MID stops at the end")
+            TestRunner.expect(eval("MID(\"Golle\", 0, 2)").error != nil, "MID from 0 is an error")
+            TestRunner.equal(value("FIND(\"LL\", \"Golle\")"), .number(3), "FIND ignores case")
+            TestRunner.equal(value("FIND(\"e\", {Name})"), .number(3), "and accents")
+            TestRunner.equal(value("FIND(\"x\", \"Golle\")"), .number(0), "0 when not found")
+            TestRunner.equal(value("SUBSTITUTE(\"a-b-c\", \"-\", \" / \")"), .text("a / b / c"), "SUBSTITUTE replaces every one")
+            TestRunner.equal(value("SUBSTITUTE(\"abc\", \"\", \"x\")"), .text("abc"), "nothing to replace")
+            TestRunner.equal(value("LEFT({Name}, FIND(\"h\", {Name}))"), .text("Th"), "FIND inside LEFT")
+            TestRunner.equal(value("FORMATDATE({When}, \"yyyy-MM-dd\")"), .text("2024-02-28"), "FORMATDATE with a pattern")
+            TestRunner.equal(value("FORMATDATE({When}, \"d/M\")"), .text("28/2"), "short pattern")
+            TestRunner.expect(eval("FORMATDATE({Price})").error != nil, "FORMATDATE needs a date")
+            TestRunner.equal(value("SWITCH({Quantity}, 1, \"one\", 4, \"four\", \"many\")"), .text("four"), "SWITCH picks the match")
+            TestRunner.equal(value("SWITCH({Quantity}, 1, \"one\", \"many\")"), .text("many"), "or the otherwise")
+            TestRunner.equal(value("SWITCH({Quantity}, 1, \"one\")"), nil, "or nothing")
+            TestRunner.equal(value("SWITCH({Name}, \"thé\", \"tea\", 1 / 0)"), .text("tea"), "only the result it picks is worked out")
             TestRunner.equal(value("1 + 2 * 3"), .number(7), "precedence")
             TestRunner.equal(value("(1 + 2) * 3"), .number(9), "brackets")
             TestRunner.equal(value("2 ^ 3 ^ 2"), .number(512), "power is right-associative")
@@ -1933,14 +1955,504 @@ enum Tests {
             let t5 = DataTable(name: "T5", fields: [retyped])
             TestRunner.expect(!Resolver(database: Database(tables: [t5]), table: t5).hasRules, "a rule the type can't have is no rule")
 
+            // Value rules: a range, dates on one side of today, a pattern. Empty cells break none.
+            var price = Field(name: "Price", type: .number)
+            price.options.minimum = 0
+            price.options.maximum = 100
+            var bought = Field(name: "Bought", type: .date)
+            bought.options.dateLimit = .notFuture
+            var post = Field(name: "Postcode", type: .text)
+            post.options.pattern = TextPattern.dutchPostcode.regex
+            post.options.patternName = TextPattern.dutchPostcode.name
+            var t6 = DataTable(name: "T6", fields: [price, bought, post])
+            let cal = Calendar.current
+            var ok = Record(); ok[price.id] = .number(50); ok[bought.id] = .date(cal.date(byAdding: .day, value: -3, to: Date())!); ok[post.id] = .text("8911 AB")
+            var bad = Record(); bad[price.id] = .number(120); bad[bought.id] = .date(cal.date(byAdding: .day, value: 3, to: Date())!); bad[post.id] = .text("89 AB")
+            var low = Record(); low[price.id] = .number(-1); low[bought.id] = .date(Date())
+            let blank = Record()
+            t6.records = [ok, bad, low, blank]
+            let r6 = Resolver(database: Database(tables: [t6]), table: t6)
+            TestRunner.equal(r6.ruleProblems(ok).count, 0, "a record that follows every rule")
+            TestRunner.equal(r6.ruleProblem(bad, price), .outOfRange("Above 100"), "above the maximum")
+            TestRunner.equal(r6.ruleProblem(low, price), .outOfRange("Below 0"), "below the minimum")
+            TestRunner.equal(r6.ruleProblem(bad, bought), .wrongDate(.notFuture), "a date in the future")
+            TestRunner.equal(r6.ruleProblem(low, bought), nil, "today is not the future")
+            TestRunner.equal(r6.ruleProblem(bad, post), .noMatch("Dutch postcode (1234 AB)"), "text that doesn't match")
+            TestRunner.equal(r6.ruleProblems(blank).count, 0, "empty cells break no value rule")
+            TestRunner.equal(Resolver.RuleProblem.outOfRange("Above 100").sentence(price), "Price is above 100", "said in the form")
+            TestRunner.expect(r6.hasRules, "value rules count as rules")
+            for (pattern, good, wrong) in [(TextPattern.digits, "0123", "12a"), (.lettersAndDigits, "Één2", "a-b"), (.email, "a@b.nl", "a@b"), (.capital, "Ölst", "ölst")] {
+                TestRunner.expect("\(good)".range(of: pattern.regex, options: .regularExpression) != nil, "\(pattern.name): \(good) matches")
+                TestRunner.expect("\(wrong)".range(of: pattern.regex, options: .regularExpression) == nil, "\(pattern.name): \(wrong) doesn't")
+            }
+            var unreadable = Field(name: "Code", type: .text)
+            unreadable.options.pattern = "[unclosed"
+            TestRunner.expect(!Resolver.hasRules(unreadable), "a pattern that can't be read is no rule")
+            var stars = Field(name: "Stars", type: .rating)
+            stars.options.minimum = 3
+            var two = Record(); two[stars.id] = .rating(2)
+            let t7 = DataTable(name: "T7", fields: [stars], records: [two])
+            TestRunner.equal(Resolver(database: Database(tables: [t7]), table: t7).ruleProblem(two, stars), .outOfRange("Below 3"), "a rating below the minimum")
+
             // Rules are saved.
             do {
                 let read = try DatabaseFile.decode(DatabaseFile.encode(Database(tables: [table])))
                 TestRunner.equal(read.tables[0].fields.map(\.options.required), [true, false], "required saved")
                 TestRunner.equal(read.tables[0].fields.map(\.options.unique), [false, true], "unique saved")
+                let ruled = try DatabaseFile.decode(DatabaseFile.encode(Database(tables: [t6])))
+                TestRunner.equal(ruled.tables[0].fields[0].options.maximum, 100, "a maximum saved")
+                TestRunner.equal(ruled.tables[0].fields[1].options.dateLimit, .notFuture, "a date limit saved")
+                TestRunner.equal(ruled.tables[0].fields[2].options.patternName, TextPattern.dutchPostcode.name, "a pattern saved")
             } catch {
                 TestRunner.expect(false, "save threw \(error)")
             }
+        }
+    }
+
+    private static func summaryTable() {
+        TestRunner.suite("Summary table") {
+            let format = Field(name: "Format", type: .choice, options: FieldOptions(choices: ["LP", "CD"]))
+            let genre = Field(name: "Genre", type: .multiChoice, options: FieldOptions(choices: ["Jazz", "Rock"]))
+            let year = Field(name: "Year", type: .number)
+            let price = Field(name: "Price", type: .number)
+            let bought = Field(name: "Bought", type: .date)
+            var table = DataTable(name: "Albums", fields: [format, genre, year, price, bought])
+            let cal = Calendar.current
+            func album(_ f: String?, _ g: [String], _ y: Double, _ p: Double?, _ month: Int) -> Record {
+                var r = Record()
+                if let f { r[format.id] = .choices([f]) }
+                if !g.isEmpty { r[genre.id] = .choices(g) }
+                r[year.id] = .number(y)
+                if let p { r[price.id] = .number(p) }
+                r[bought.id] = .date(cal.date(from: DateComponents(year: 2026, month: month, day: 10))!)
+                return r
+            }
+            table.records = [album("CD", ["Rock"], 1977, 10, 1), album("LP", ["Jazz"], 1959, 30, 1), album("LP", ["Jazz", "Rock"], 1969, 20, 3),
+                             album(nil, [], 2013, nil, 3)]
+            let r = Resolver(database: Database(tables: [table]), table: table)
+            var settings = PivotSettings()
+            settings.rowFieldID = format.id
+            settings.columnFieldID = genre.id
+            guard let result = Pivot.compute(table.records, settings: settings, r) else { TestRunner.expect(false, "a result"); return }
+            TestRunner.equal(result.rows.map(\.label), ["LP", "CD", "No Format"], "rows in the options' order, empty last")
+            TestRunner.equal(result.columns.map(\.label), ["Jazz", "Rock", "No Genre"], "columns too")
+            TestRunner.equal(result.cells[0].map(\.value), [2, 1, nil], "LP: two jazz, one rock (a record with both counts in each)")
+            TestRunner.equal(result.rowTotals.map(\.value), [2, 1, 1], "row totals count each record once")
+            TestRunner.equal(result.columnTotals.map(\.value), [2, 2, 1], "column totals")
+            TestRunner.equal(result.total.value, 4, "every record once in the total")
+            TestRunner.equal(result.cells[0][0].records.count, 2, "a cell knows its records, to select them")
+
+            // Sums and averages of a number field, in its format; records without a number don't count.
+            settings.measure = .sum
+            settings.valueFieldID = price.id
+            settings.columnFieldID = nil
+            let sums = Pivot.compute(table.records, settings: settings, r)!
+            TestRunner.equal(sums.columns.count, 0, "no column field: only the totals")
+            TestRunner.equal(sums.rowTotals.map(\.value), [50, 10, nil], "sums per row; nothing for a row without prices")
+            settings.measure = .average
+            TestRunner.equal(Pivot.compute(table.records, settings: settings, r)!.total.value, 20, "an average over the records with a number")
+            settings.measure = .maximum
+            TestRunner.equal(Pivot.compute(table.records, settings: settings, r)!.rowTotals.first?.value, 30, "the highest")
+            settings.measure = .minimum
+            TestRunner.equal(Pivot.compute(table.records, settings: settings, r)!.rowTotals.first?.value, 20, "the lowest")
+
+            // Numbers in steps (years by decade), dates by month.
+            settings = PivotSettings()
+            settings.rowFieldID = year.id
+            settings.rowStep = .tens
+            let decades = Pivot.compute(table.records, settings: settings, r)!
+            TestRunner.equal(decades.rows.map(\.label), ["1950 – 1959", "1960 – 1969", "1970 – 1979", "2010 – 2019"], "years by decade, in order")
+            settings.rowFieldID = bought.id
+            settings.rowDateUnit = .month
+            let months = Pivot.compute(table.records, settings: settings, r)!
+            TestRunner.equal(months.rows.count, 2, "dates by month")
+            TestRunner.equal(months.rowTotals.map(\.value), [2, 2], "two in each month, earliest first")
+
+            // Copied for a spreadsheet: a header, a row per category, the totals.
+            settings = PivotSettings()
+            settings.rowFieldID = format.id
+            let copied = Pivot.copyText(Pivot.compute(table.records, settings: settings, r)!, settings: settings, resolver: r, rowName: "Format")
+            TestRunner.equal(copied, "Format\tTotal\nLP\t2\nCD\t1\nNo Format\t1\nTotal\t4", "copied as rows with tabs")
+            // Saved with the view; the summary is the ninth view (⌘9).
+            var view = SavedView(name: "S", mode: .summary)
+            view.summary = settings
+            if let data = try? JSONEncoder().encode(view), let read = try? JSONDecoder().decode(SavedView.self, from: data) {
+                TestRunner.equal(read.summary, settings, "settings saved")
+                TestRunner.equal(read.mode, .summary, "mode saved")
+            } else {
+                TestRunner.expect(false, "view round trip")
+            }
+            TestRunner.equal(ViewMode.allCases.firstIndex(of: .summary), 8, "⌘9")
+        }
+    }
+
+    /// The table grid in a window of this app that is never on screen: clicks and key presses go
+    /// to that window only (nothing activates, no other app sees them), and the values typed are
+    /// checked in the document.
+    private static func gridInWindow() {
+        TestRunner.suite("Table grid in a window") {
+            let harness = GridHarness()
+            defer { harness.close() }
+            let h = harness
+            // The first arrow picks the first cell.
+            h.key(.down)
+            TestRunner.equal(h.document.selectedRecordIDs, [h.records[0]], "the first key press selects the first cell")
+            // Text: type, Return.
+            h.type("Lamp")
+            h.key(.return)
+            TestRunner.equal(h.value(0, "Name"), .text("Lamp"), "typing into a text cell")
+            TestRunner.equal(h.document.selectedRecordIDs, [h.records[1]], "Return moves down")
+            h.type("Desk")
+            h.key(.tab)
+            TestRunner.equal(h.value(1, "Name"), .text("Desk"), "Tab saves")
+            // Now in Quantity of the second row.
+            h.type("12")
+            h.key(.return)
+            TestRunner.equal(h.value(1, "Quantity"), .number(12), "typing into a number cell")
+            // Row 3 now; across the columns with Tab, each type typed in as you would.
+            TestRunner.equal(h.document.selectedRecordIDs, [h.records[2]], "on the third row")
+            h.key(.tab) // Price
+            h.type("9,50")
+            h.key(.tab)
+            TestRunner.equal(h.value(2, "Price"), .number(9.5), "a price with a decimal comma")
+            h.type("2024-03-05") // Bought
+            h.key(.tab)
+            TestRunner.equal(h.value(2, "Bought")?.date.map { Calendar.current.dateComponents([.year, .month, .day], from: $0) },
+                             DateComponents(year: 2024, month: 3, day: 5), "a date typed in")
+            h.key(.space) // Done
+            TestRunner.equal(h.value(2, "Done"), .bool(true), "Space checks a checkbox")
+            h.key(.space)
+            TestRunner.equal(h.value(2, "Done"), nil, "and unchecks it")
+            h.key(.tab) // Stars
+            h.type("4")
+            TestRunner.equal(h.value(2, "Stars"), .rating(4), "a digit sets the rating")
+            h.key(.tab) // Length
+            h.type("1:30")
+            h.key(.tab)
+            TestRunner.equal(h.value(2, "Length"), .number(90), "a duration")
+            h.type("golle.app") // Site
+            h.key(.tab)
+            TestRunner.equal(h.value(2, "Site"), .text("golle.app"), "a web link")
+            h.type("a@b.nl") // Mail
+            h.key(.tab)
+            TestRunner.equal(h.value(2, "Mail"), .text("a@b.nl"), "an email address")
+            h.type("978-0 14") // Code
+            h.key(.tab)
+            TestRunner.equal(h.value(2, "Code"), .text("978014"), "a barcode, without spaces and dashes")
+            h.type("40") // Progress
+            h.key(.tab)
+            TestRunner.equal(h.value(2, "Progress"), .number(40), "progress")
+            // The rest open their own editor in a popover on the cell (Return), empty cells too; a
+            // popover can't open in a window that is off screen, so only the keys are checked here.
+            for name in ["Kind", "Tags", "Notes", "Photos", "Files", "Steps", "Place"] {
+                h.key(.return)
+                h.key(.escape)
+                h.key(.tab)
+                TestRunner.equal(h.value(2, name), nil, "\(name): Return and Escape change nothing by themselves")
+            }
+            // A formula can't be typed into.
+            h.type("7")
+            TestRunner.equal(h.value(2, "Total"), nil, "nothing typed into a formula")
+            // Escape while typing leaves the value as it was.
+            h.key(.left, keys: .command)
+            h.type("Gone")
+            h.key(.escape)
+            TestRunner.equal(h.value(2, "Name"), nil, "Escape cancels typing")
+            // Delete clears the cell; ⌘Z puts it back.
+            h.key(.up)
+            h.key(.delete)
+            TestRunner.equal(h.value(1, "Name"), nil, "Delete clears the cell")
+            // Return in the last row adds a record.
+            h.key(.down, keys: .command)
+            h.type("New")
+            h.key(.return)
+            TestRunner.equal(h.table.records.count, 4, "Return in the last row adds a record")
+            TestRunner.equal(h.value(2, "Name"), .text("New"), "after saving the typing")
+
+            // The long-text editor of the popover on its own: it takes the keyboard when it shows,
+            // with the letter typed to open it, and what is typed next goes after it.
+            final class Box: ObservableObject { @Published var text = "Old" }
+            let box = Box()
+            struct Editor: View {
+                @ObservedObject var box: Box
+                var body: some View { RichTextEditor(markdown: $box.text, focusOnAppear: true, typed: "N") }
+            }
+            let popover = NSWindow(contentRect: NSRect(x: -6000, y: 800, width: 380, height: 220), styleMask: [.titled], backing: .buffered, defer: false)
+            popover.contentView = NSHostingView(rootView: Editor(box: box).frame(width: 380, height: 220))
+            popover.orderFrontRegardless()
+            h.pump(0.5)
+            TestRunner.expect(popover.firstResponder is NSTextView, "the editor has the cursor at once")
+            for c in "ew" {
+                for type in [NSEvent.EventType.keyDown, .keyUp] {
+                    if let event = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                    windowNumber: popover.windowNumber, context: nil, characters: String(c),
+                                                    charactersIgnoringModifiers: String(c), isARepeat: false, keyCode: 0) { popover.sendEvent(event) }
+                    h.pump(0.03)
+                }
+            }
+            h.pump(0.6)
+            popover.makeFirstResponder(nil)
+            h.pump(0.3)
+            TestRunner.equal(box.text, "OldNew", "the typed letter and the rest go after the text")
+            popover.orderOut(nil)
+
+            // Typing in the form's long text beside the grid goes into the text, not the grid.
+            let notes = h.textViews()
+            TestRunner.expect(!notes.isEmpty, "the form beside the grid has a long-text editor")
+            if let view = notes.first {
+                h.window.makeFirstResponder(view)
+                h.pump(0.2)
+                h.typeKeys("hello")
+                h.pump(0.6)
+                TestRunner.equal(view.string, "hello", "typed into the notes")
+                h.window.makeFirstResponder(nil)
+                h.pump(0.3)
+                TestRunner.equal(h.value(0, "Notes"), .text("hello"), "and saved")
+                TestRunner.equal(h.value(0, "Name"), .text("Lamp"), "the grid's cell is left alone")
+            }
+        }
+    }
+
+    private static func grid() {
+        TestRunner.suite("Table grid") {
+            let r = (0..<4).map { _ in UUID() }, c = (0..<3).map { _ in UUID() }
+            var sel = GridSelection(GridPoint(record: r[1], field: c[1]))
+            TestRunner.equal(sel.block(order: r, columns: c).records, [r[1]], "one cell")
+            TestRunner.expect(!sel.isBlock(order: r, columns: c), "is not a block")
+            // Arrows move, ⇧ extends, the edges hold.
+            sel = sel.moved(rows: 1, columns: 1, extend: true, order: r, columns: c)
+            let block = sel.block(order: r, columns: c)
+            TestRunner.equal(block.records, [r[1], r[2]], "⇧ and arrows extend over rows")
+            TestRunner.equal(block.fields, [c[1], c[2]], "and columns")
+            TestRunner.expect(sel.contains(GridPoint(record: r[2], field: c[2]), order: r, columns: c), "the block holds its corner")
+            TestRunner.expect(!sel.contains(GridPoint(record: r[0], field: c[1]), order: r, columns: c), "but not what is outside")
+            let moved = sel.moved(rows: 10, columns: -10, extend: false, order: r, columns: c)
+            TestRunner.equal(moved.cursor, GridPoint(record: r[3], field: c[0]), "an arrow without ⇧ moves one cell, kept inside the table")
+            TestRunner.equal(moved.anchor, moved.cursor, "and the block is gone")
+            // The cursor and anchor in reverse order still give the block top-down.
+            var up = GridSelection(GridPoint(record: r[3], field: c[2]))
+            up = up.extended(to: GridPoint(record: r[1], field: c[0]))
+            TestRunner.equal(up.block(order: r, columns: c).records, [r[1], r[2], r[3]], "dragged upwards: rows in order")
+            TestRunner.equal(up.block(order: r, columns: c).fields, c, "columns in order")
+            // Whole rows from the row numbers, ⌘ adds single rows.
+            var rows = GridSelection(GridPoint(record: r[0], field: c[0]), wholeRows: true)
+            rows.extraRows = [r[3]]
+            TestRunner.equal(rows.block(order: r, columns: c).records, [r[0], r[3]], "rows picked one by one")
+            TestRunner.equal(rows.block(order: r, columns: c).fields, c, "every column of them")
+            // A selection follows its records when they are sorted.
+            let sorted = [r[3], r[2], r[1], r[0]]
+            TestRunner.equal(sel.block(order: sorted, columns: c).records, [r[2], r[1]], "after sorting: the same records")
+            // A record that is gone: no block.
+            TestRunner.equal(GridSelection(GridPoint(record: UUID(), field: c[0])).block(order: r, columns: c).records, [], "a deleted record selects nothing")
+            TestRunner.equal(GridSelection.all(order: r, columns: c)?.block(order: r, columns: c).records, r, "select all")
+
+            // Columns: order and widths per view.
+            let a = Field(name: "A", type: .text), b = Field(name: "B", type: .number), d = Field(name: "D", type: .checkbox)
+            let table = DataTable(name: "T", fields: [a, b, d])
+            var view = SavedView(name: "V")
+            TestRunner.equal(view.columns(table).map(\.id), [a.id, b.id, d.id], "table order to start with")
+            view.columnOrder = GridColumns.moving(d.id, before: a.id, in: [a.id, b.id, d.id])
+            TestRunner.equal(view.columns(table).map(\.id), [d.id, a.id, b.id], "a column moved to the front")
+            view.columnOrder = [b.id]
+            TestRunner.equal(view.columns(table).map(\.id), [b.id, a.id, d.id], "fields not arranged yet follow in table order")
+            view.hiddenFieldIDs = [a.id]
+            TestRunner.equal(view.columns(table).map(\.id), [b.id, d.id], "hidden fields are no columns")
+            TestRunner.equal(GridColumns.width(d, in: view), 64, "a checkbox column starts narrow")
+            view.columnWidths[a.id.uuidString] = 300
+            TestRunner.equal(GridColumns.width(a, in: view), 300, "a width set by dragging")
+            view.columnWidths[a.id.uuidString] = 5
+            TestRunner.equal(GridColumns.width(a, in: view), GridColumns.minWidth, "never too narrow to grab")
+            if let data = try? JSONEncoder().encode(view), let read = try? JSONDecoder().decode(SavedView.self, from: data) {
+                TestRunner.equal(read.columnOrder, view.columnOrder, "order saved")
+                TestRunner.equal(read.columnWidths, view.columnWidths, "widths saved")
+            } else {
+                TestRunner.expect(false, "view round trip")
+            }
+            // Sorting from the header.
+            TestRunner.equal(GridColumns.sorting([], by: a.id, adding: false), [SortKey(fieldID: a.id)], "a click sorts ascending")
+            TestRunner.equal(GridColumns.sorting([SortKey(fieldID: a.id)], by: a.id, adding: false), [SortKey(fieldID: a.id, ascending: false)], "again: descending")
+            TestRunner.equal(GridColumns.sorting([SortKey(fieldID: a.id)], by: b.id, adding: false), [SortKey(fieldID: b.id)], "another column replaces the sort")
+            TestRunner.equal(GridColumns.sorting([SortKey(fieldID: a.id)], by: b.id, adding: true), [SortKey(fieldID: a.id), SortKey(fieldID: b.id)], "with ⇧ it is added")
+
+            // Clearing a block and filling it down, each one undo step.
+            let formula = Field(name: "F", type: .formula, options: FieldOptions(formula: "{B} * 2"))
+            var t = DataTable(name: "T", fields: [a, b, formula])
+            var x = Record(); x[a.id] = .text("x"); x[b.id] = .number(1)
+            var y = Record(); y[a.id] = .text("y"); y[b.id] = .number(2)
+            var z = Record(); z[a.id] = .text("z")
+            t.records = [x, y, z]
+            let undo = UndoManager()
+            undo.groupsByEvent = false
+            let document = GolleDocument(database: Database(tables: [t]))
+            document.undoManager = undo
+            undo.beginUndoGrouping()
+            document.fillDown(fields: [a.id, b.id, formula.id], records: [x.id, y.id, z.id], table: t.id)
+            undo.endUndoGrouping()
+            TestRunner.equal(document.database.tables[0].records.map { $0[a.id] }, [.text("x"), .text("x"), .text("x")], "filled down in the first column")
+            TestRunner.equal(document.database.tables[0].records.map { $0[b.id] }, [.number(1), .number(1), .number(1)], "and the second")
+            undo.undo()
+            TestRunner.equal(document.database.tables[0].records.map { $0[b.id] }, [.number(1), .number(2), nil], "one undo step")
+            undo.beginUndoGrouping()
+            document.clearCells(records: [x.id, y.id], fields: [b.id, formula.id], table: t.id)
+            undo.endUndoGrouping()
+            TestRunner.equal(document.database.tables[0].records.map { $0[b.id] }, [nil, nil, nil], "a block cleared")
+            TestRunner.equal(document.database.tables[0].records[0][a.id], .text("x"), "the columns beside it stay")
+            TestRunner.equal(document.database.tables[0].history[x.id]?.last?.old, .number(1), "in the history")
+            undo.undo()
+            TestRunner.equal(document.database.tables[0].records[1][b.id], .number(2), "undone in one step")
+            // Photos and files are cleared too; a formula stays as it is.
+            let photos = Field(name: "Photos", type: .image), files = Field(name: "Files", type: .file)
+            var withFiles = DataTable(name: "F", fields: [photos, files, formula])
+            var p1 = Record(), p2 = Record()
+            p1[photos.id] = .attachments([Attachment(name: "a.png")]); p1[files.id] = .attachments([Attachment(name: "a.pdf")])
+            p2[photos.id] = .attachments([Attachment(name: "b.png"), Attachment(name: "c.png")])
+            withFiles.records = [p1, p2]
+            let fileDocument = GolleDocument(database: Database(tables: [withFiles]))
+            fileDocument.clearCells(records: [p1.id, p2.id], fields: [photos.id, files.id, formula.id], table: withFiles.id)
+            TestRunner.equal(fileDocument.database.tables[0].records.map { $0[photos.id] }, [nil, nil], "photos cleared from several records")
+            TestRunner.equal(fileDocument.database.tables[0].records[0][files.id], nil, "files cleared")
+
+            // Fill Down copies photos too.
+            var down = DataTable(name: "D", fields: [photos])
+            var top = Record(); top[photos.id] = .attachments([Attachment(name: "top.png")])
+            let below = Record()
+            down.records = [top, below]
+            let downDocument = GolleDocument(database: Database(tables: [down]))
+            downDocument.fillDown(fields: [photos.id], records: [top.id, below.id], table: down.id)
+            TestRunner.equal(downDocument.database.tables[0].records[1][photos.id], top[photos.id], "Fill Down copies photos")
+
+            // Copied in Golle and pasted back: photos and links come along as they are; another type
+            // of field gets the text.
+            let title = Field(name: "Title", type: .text)
+            let copyTable = DataTable(name: "C", fields: [photos, title], records: [top, below])
+            let copyResolver = Resolver(database: Database(tables: [copyTable]), table: copyTable)
+            let copiedText = CellClipboard.text([top], fields: [photos], resolver: copyResolver)
+            let cells = CellClipboard.cells([top], fields: [photos])
+            let intoPhotos = CellClipboard.plan(CellClipboard.grid(copiedText), table: copyTable, columns: copyTable.fields, startColumn: 0,
+                                                rows: [below.id], resolver: copyResolver, values: cells)
+            TestRunner.expect(intoPhotos.updates.contains { $0.record == below.id && $0.field == photos.id && $0.value == top[photos.id] }, "a photo pasted into a photo cell")
+            let intoTitle = CellClipboard.plan(CellClipboard.grid(copiedText), table: copyTable, columns: copyTable.fields, startColumn: 1,
+                                               rows: [below.id], resolver: copyResolver, values: cells)
+            TestRunner.expect(intoTitle.updates.contains { $0.field == title.id && $0.value == .text("top.png") }, "into a text field: its name")
+            let asText = CellClipboard.plan(CellClipboard.grid(copiedText), table: copyTable, columns: copyTable.fields, startColumn: 0,
+                                            rows: [below.id], resolver: copyResolver)
+            TestRunner.expect(asText.isEmpty, "only text (copied elsewhere): a name can't become a photo")
+            undo.removeAllActions()
+            document.undoManager = nil
+        }
+    }
+
+    private static func copyPasteRelated() {
+        TestRunner.suite("Copy and paste") {
+            // Reading the clipboard: tabs between cells, a line per row, quotes as spreadsheets write them.
+            TestRunner.equal(CellClipboard.grid("a\tb\r\nc\td\n"), [["a", "b"], ["c", "d"]], "rows and cells; the last line break ends the block")
+            TestRunner.equal(CellClipboard.grid("1\n\n3"), [["1"], [""], ["3"]], "empty rows are kept, so a column lands on the right records")
+            TestRunner.equal(CellClipboard.grid("\"two\nlines\"\t\"say \"\"hi\"\"\""), [["two\nlines", "say \"hi\""]], "quoted cells")
+            TestRunner.equal(CellClipboard.grid("12\" vinyl"), [["12\" vinyl"]], "a quote inside a cell is just a quote")
+            TestRunner.expect(CellClipboard.isBlock("a\tb") && CellClipboard.isBlock("a\nb") && !CellClipboard.isBlock("abc\n"), "what counts as a block")
+            TestRunner.equal(CellPasting.oneLine("a\tb\nc"), "a b c", "a block kept in one cell becomes one line")
+
+            let title = Field(name: "Title", type: .text)
+            let year = Field(name: "Year", type: .number)
+            let format = Field(name: "Format", type: .choice, options: FieldOptions(choices: ["LP", "CD"]))
+            let bought = Field(name: "Bought", type: .date)
+            let number = Field(name: "No.", type: .autoNumber)
+            let label = Field(name: "Label", type: .formula, options: FieldOptions(formula: "{Title} & \" \" & {Year}"))
+            var table = DataTable(name: "Albums", fields: [title, year, format, bought, number, label])
+            var a = Record(); a[title.id] = .text("Blue"); a[year.id] = .number(1971); a[format.id] = .choices(["LP"]); a[number.id] = .number(1)
+            a[bought.id] = .date(Calendar.current.date(from: DateComponents(year: 2024, month: 3, day: 5))!)
+            var b = Record(); b[title.id] = .text("Rumours"); b[year.id] = .number(1977); b[number.id] = .number(2)
+            table.records = [a, b]
+            let db = Database(tables: [table])
+            let r = Resolver(database: db, table: table)
+            let copied = CellClipboard.text([a, b], fields: table.fields, resolver: r)
+            TestRunner.equal(copied, "Blue\t1971\tLP\t2024-03-05\t1\tBlue 1971\nRumours\t1977\t\t\t2\tRumours 1977", "rows copied as lines, cells as an export writes them")
+
+            // Pasting the copy into an empty table of the same fields gives the same values back.
+            var empty = table
+            empty.records = []
+            let back = CellClipboard.plan(CellClipboard.grid(copied), table: empty, columns: empty.fields, startColumn: 0, rows: [], resolver: Resolver(database: Database(tables: [empty]), table: empty))
+            TestRunner.equal(back.added.count, 2, "two new records")
+            TestRunner.equal(back.added.first?[year.id], .number(1971), "numbers come back")
+            TestRunner.equal(back.added.first?[bought.id], a[bought.id], "dates come back")
+            TestRunner.equal(back.added.first?[format.id], .choices(["LP"]), "choices come back")
+            TestRunner.equal(back.added.first?[label.id], nil, "formulas aren't pasted into")
+            TestRunner.equal(back.readOnly, 2, "the automatic number and the formula are skipped")
+
+            // A column pasted from the Year column down, over the records shown and on into new ones.
+            let column = CellClipboard.plan(CellClipboard.grid("1972\n\nabc\n1990"), table: table, columns: table.fields, startColumn: 1,
+                                            rows: [a.id, b.id], resolver: r)
+            TestRunner.expect(column.updates.contains { $0.record == a.id && $0.field == year.id && $0.value == .number(1972) }, "the first row gets the first value")
+            TestRunner.expect(column.updates.contains { $0.record == b.id && $0.field == year.id && $0.value == nil }, "an empty cell clears")
+            TestRunner.equal(column.skipped, 1, "text that isn't a number is left out")
+            TestRunner.equal(column.added.map { $0[year.id] }, [.number(1990)], "rows past the last record become records")
+
+            // A first row of field names puts each column under its field.
+            let named = CellClipboard.plan(CellClipboard.grid("Format\tTitle\nTape\tHarvest"), table: table, columns: table.fields, startColumn: 3,
+                                           rows: [], resolver: r)
+            TestRunner.equal(named.added.first?[title.id], .text("Harvest"), "columns by name")
+            TestRunner.equal(named.newChoices[format.id], ["Tape"], "a new option is added to the choices")
+
+            // In the document: one undo step, history, numbers for new records.
+            let undo = UndoManager()
+            undo.groupsByEvent = false
+            let document = GolleDocument(database: db)
+            document.undoManager = undo
+            undo.beginUndoGrouping()
+            let pasted = document.paste(column, into: table.id)
+            undo.endUndoGrouping()
+            let after = document.database.tables[0]
+            TestRunner.equal(after.records.count, 3, "a record added")
+            TestRunner.equal(after.records[0][year.id], .number(1972), "a cell changed")
+            TestRunner.equal(after.records[2][number.id], .number(3), "the new record is numbered after the others")
+            TestRunner.equal(pasted, [a.id, b.id, after.records[2].id], "the records pasted into")
+            TestRunner.equal(after.history[a.id]?.last?.new, .number(1972), "in the record's history")
+            undo.undo()
+            TestRunner.equal(document.database.tables[0].records.count, 2, "one undo step")
+            TestRunner.equal(document.database.tables[0].records[0][year.id], .number(1971), "undone")
+            undo.removeAllActions()
+            document.undoManager = nil
+            let withChoice = document.paste(named, into: table.id)
+            TestRunner.equal(document.database.tables[0].field(format.id)?.options.choices, ["LP", "CD", "Tape"], "the new option is in the list")
+            TestRunner.equal(withChoice.count, 1, "one record pasted")
+
+            // Fill down: the first record's value into the others.
+            document.fillDown(field: format.id, records: [a.id, b.id], table: table.id)
+            TestRunner.equal(document.database.tables[0].records[1][format.id], .choices(["LP"]), "filled down")
+            TestRunner.equal(document.database.tables[0].records[0][format.id], .choices(["LP"]), "the first stays")
+            document.fillDown(field: label.id, records: [a.id, b.id], table: table.id)
+            TestRunner.equal(document.database.tables[0].records[1][label.id], nil, "not into a formula")
+
+            // Links by name.
+            var artists = DataTable(name: "Artists", fields: [Field(name: "Name", type: .text)])
+            var miles = Record(); miles[artists.fields[0].id] = .text("Miles Davis")
+            artists.records = [miles]
+            let link = Field(name: "Artist", type: .link, options: FieldOptions(linkedTableID: artists.id))
+            let songs = DataTable(name: "Songs", fields: [link])
+            let linkResolver = Resolver(database: Database(tables: [songs, artists]), table: songs)
+            TestRunner.equal(CellClipboard.value("miles davis", for: link, order: nil, resolver: linkResolver), .links([miles.id]), "a link by name")
+            TestRunner.equal(CellClipboard.value("Nobody", for: link, order: nil, resolver: linkResolver), nil, "an unknown name links nothing")
+        }
+
+        TestRunner.suite("Related records") {
+            let name = Field(name: "Name", type: .text)
+            var artists = DataTable(name: "Artists", fields: [name])
+            var miles = Record(); miles[name.id] = .text("Miles")
+            artists.records = [miles]
+            let link = Field(name: "Artist", type: .link, options: FieldOptions(linkedTableID: artists.id))
+            let notes = Field(name: "Notes", type: .longText)
+            let title = Field(name: "Title", type: .text)
+            let year = Field(name: "Year", type: .number), price = Field(name: "Price", type: .number), extra = Field(name: "Extra", type: .text)
+            var albums = DataTable(name: "Albums", fields: [link, notes, year, title, price, extra])
+            var kind = Record(); kind[title.id] = .text("Kind of Blue"); kind[link.id] = .links([miles.id])
+            albums.records = [kind]
+            TestRunner.equal(RelatedRecords.columns(albums, link: link).map(\.id), [title.id, year.id, price.id],
+                             "the name first, then short fields; not the link back or long text")
+            let document = GolleDocument(database: Database(tables: [artists, albums]))
+            let added = document.addRecord(to: albums.id, values: [link.id: .links([miles.id])])
+            let resolver = document.resolver(for: document.database.tables[0])
+            let linked = resolver.backlinks(to: miles).first?.records.map(\.id) ?? []
+            TestRunner.equal(linked, [kind.id, added].compactMap { $0 }, "a record added from the form links back")
         }
     }
 
@@ -2293,5 +2805,162 @@ enum Tests {
             let copy = albums.duplicated()
             TestRunner.equal(copy.fields[1].options.rollupLinkFieldID, copy.fields[0].id, "a copied rollup goes through the copied link")
         }
+    }
+}
+
+
+/// A table grid in a window that stays off screen, with clicks and keys sent to that window only.
+@MainActor
+final class GridHarness {
+    /// Accepts the first click: a window that isn't in front otherwise takes it to come forward.
+    private final class Host<V: View>: NSHostingView<V> {
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    }
+
+    let document: GolleDocument
+    let window: NSWindow
+    let size = CGSize(width: 1760, height: 700)
+
+    var table: DataTable { document.database.tables[0] }
+    var records: [Record.ID] { table.records.map(\.id) }
+
+    init() {
+        NSApplication.shared.setActivationPolicy(.prohibited)
+        NSApplication.shared.finishLaunching()
+        let types: [(String, FieldType)] = [("Name", .text), ("Quantity", .number), ("Price", .number), ("Bought", .date), ("Done", .checkbox),
+                                            ("Stars", .rating), ("Length", .duration), ("Site", .url), ("Mail", .email), ("Code", .barcode),
+                                            ("Progress", .progress), ("Kind", .choice), ("Tags", .multiChoice), ("Notes", .longText),
+                                            ("Photos", .image), ("Files", .file), ("Steps", .checklist), ("Place", .location), ("Total", .formula)]
+        var table = DataTable(name: "Items", fields: types.map { Field(name: $0.0, type: $0.1) })
+        table.fields[11].options.choices = ["A", "B"]
+        table.fields[12].options.choices = ["x", "y"]
+        table.fields[18].options.formula = "{Quantity} * 2"
+        table.fields[13].options.richText = true
+        table.records = [Record(), Record(), Record()]
+        document = GolleDocument(database: Database(tables: [table]))
+        document.selectedTableID = document.database.tables[0].id
+        window = NSWindow(contentRect: NSRect(x: -6000, y: 0, width: size.width, height: size.height), styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = Host(rootView: Live(document: document).frame(width: size.width, height: size.height))
+        window.orderFrontRegardless()
+        pump(0.4)
+    }
+
+    /// The grid redrawn with the document, as the window's own view does.
+    private struct Live: View {
+        @ObservedObject var document: GolleDocument
+        var body: some View {
+            let table = document.database.tables[0]
+            let resolver = document.resolver(for: table)
+            HStack(spacing: 0) {
+                RecordGrid(document: document, table: table, view: document.currentView, rows: table.records, resolver: resolver)
+                // The inspector beside it, as in the window: the first record's form.
+                if let record = table.records.first {
+                    RecordForm(document: document, table: table, record: record, resolver: resolver).frame(width: 360)
+                }
+            }
+        }
+    }
+
+    /// The text views (long text) in the window, in the form beside the grid.
+    func textViews() -> [NSTextView] {
+        func find(_ view: NSView) -> [NSTextView] {
+            (view as? NSTextView).map { [$0] } ?? view.subviews.flatMap(find)
+        }
+        return window.contentView.map(find)?.filter { !$0.isFieldEditor } ?? []
+    }
+
+    /// Types into whatever has the keyboard.
+    func typeKeys(_ text: String) { type(text) }
+
+    func close() { window.orderOut(nil) }
+
+    func value(_ row: Int, _ name: String) -> Value? {
+        table.records[row][table.field(named: name)!.id]
+    }
+
+    func pump(_ seconds: Double) {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if let event = NSApp.nextEvent(matching: .any, until: Date().addingTimeInterval(0.01), inMode: .default, dequeue: true) {
+                NSApp.sendEvent(event)
+            }
+        }
+    }
+
+    /// The middle of a cell, in the window's coordinates (counted from the bottom).
+    func point(row: Int, field name: String) -> CGPoint {
+        let view = document.currentView
+        let columns = view.columns(table)
+        var x = RecordGrid.numberWidth
+        for field in columns {
+            let width = CGFloat(GridColumns.width(field, in: view))
+            if field.name == name { x += width / 2; break }
+            x += width
+        }
+        let y = RecordGrid.headerHeight + CGFloat(row) * RecordGrid.rowHeight + RecordGrid.rowHeight / 2
+        return CGPoint(x: x, y: size.height - y)
+    }
+
+    private func mouse(_ type: NSEvent.EventType, at point: CGPoint, count: Int) {
+        if let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                          windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: count, pressure: 1) {
+            window.sendEvent(event)
+        }
+        pump(0.03)
+    }
+
+    func click(row: Int, field: String) {
+        let p = point(row: row, field: field)
+        mouse(.leftMouseDown, at: p, count: 1)
+        mouse(.leftMouseUp, at: p, count: 1)
+        // Past the double-click time, so the next click is a click of its own.
+        pump(NSEvent.doubleClickInterval + 0.1)
+    }
+
+    func doubleClick(row: Int, field: String) {
+        let p = point(row: row, field: field)
+        mouse(.leftMouseDown, at: p, count: 1)
+        mouse(.leftMouseUp, at: p, count: 1)
+        mouse(.leftMouseDown, at: p, count: 2)
+        mouse(.leftMouseUp, at: p, count: 2)
+        pump(0.3)
+    }
+
+    enum Key {
+        case `return`, tab, escape, up, down, left, right, delete, space
+        var code: (UInt16, String) {
+            switch self {
+            case .return: (36, "\r")
+            case .tab: (48, "\t")
+            case .escape: (53, "\u{1B}")
+            case .up: (126, String(UnicodeScalar(NSUpArrowFunctionKey)!))
+            case .down: (125, String(UnicodeScalar(NSDownArrowFunctionKey)!))
+            case .left: (123, String(UnicodeScalar(NSLeftArrowFunctionKey)!))
+            case .right: (124, String(UnicodeScalar(NSRightArrowFunctionKey)!))
+            case .delete: (51, "\u{7F}")
+            case .space: (49, " ")
+            }
+        }
+    }
+
+    private func send(_ characters: String, code: UInt16, keys: NSEvent.ModifierFlags = []) {
+        for type in [NSEvent.EventType.keyDown, .keyUp] {
+            if let event = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: keys, timestamp: ProcessInfo.processInfo.systemUptime,
+                                            windowNumber: window.windowNumber, context: nil, characters: characters,
+                                            charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code) {
+                window.sendEvent(event)
+            }
+            pump(0.03)
+        }
+    }
+
+    func key(_ key: Key, keys: NSEvent.ModifierFlags = []) {
+        send(key.code.1, code: key.code.0, keys: keys)
+        pump(0.15)
+    }
+
+    func type(_ text: String) {
+        for character in text { send(String(character), code: 0) }
+        pump(0.15)
     }
 }

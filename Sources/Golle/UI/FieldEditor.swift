@@ -73,7 +73,8 @@ struct FieldEditor: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+                // Escape, not Return: Return is for the text being typed (an option, a name).
+                Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
             }
             .padding(12)
         }
@@ -220,17 +221,26 @@ private struct FieldDetail: View {
         nameBase = name
     }
 
+    private func saveFormula() {
+        guard var f = current, formula != f.options.formula else { return }
+        f.options.formula = formula
+        update(f)
+    }
+
     @ViewBuilder
     private var formulaSection: some View {
         Section {
             TextEditor(text: $formula)
                 .font(.body.monospaced())
                 .frame(minHeight: 70)
-                .onChange(of: formula) { _, text in
-                    guard var f = current, text != f.options.formula else { return }
-                    f.options.formula = text
-                    update(f)
+                // Saved once typing pauses (and when the sheet closes), not on every key: each save
+                // works out every formula of the table again.
+                .task(id: formula) {
+                    try? await Task.sleep(for: .milliseconds(400))
+                    guard !Task.isCancelled else { return }
+                    saveFormula()
                 }
+                .onDisappear(perform: saveFormula)
             HStack {
                 Menu("Insert Field") {
                     ForEach(table.fields.filter { $0.id != field.id }) { other in
@@ -377,19 +387,46 @@ private struct FieldDetail: View {
             if field.type.canBeUnique {
                 Toggle("Unique: no two records the same", isOn: Binding(get: { field.options.unique }, set: { on in update { $0.options.unique = on } }))
             }
-            if field.options.required || field.options.unique {
+            if field.type.canHaveRange {
+                LabeledContent("Between") {
+                    HStack(spacing: 6) {
+                        RuleNumberField(prompt: "minimum", value: field.options.minimum) { n in update { $0.options.minimum = n } }
+                        Text("and").foregroundStyle(.secondary)
+                        RuleNumberField(prompt: "maximum", value: field.options.maximum) { n in update { $0.options.maximum = n } }
+                    }
+                }
+                if let min = field.options.minimum, let max = field.options.maximum, min > max {
+                    Label("The minimum is above the maximum: every number breaks the rule.", systemImage: "exclamationmark.triangle").foregroundStyle(.orange).font(.caption)
+                }
+            }
+            if field.type.canLimitDates {
+                Picker("Dates", selection: Binding(get: { field.options.dateLimit }, set: { limit in update { $0.options.dateLimit = limit } })) {
+                    Text("Any date").tag(DateLimit?.none)
+                    ForEach(DateLimit.allCases) { Text($0.label).tag(DateLimit?.some($0)) }
+                }
+            }
+            if field.type.canHavePattern {
+                PatternRule(pattern: field.options.pattern, name: field.options.patternName) { pattern, name in
+                    update { $0.options.pattern = pattern; $0.options.patternName = name }
+                }
+            }
+            if Resolver.hasRules(field) {
                 let resolver = document.resolver(for: table)
                 let problems = table.records.compactMap { resolver.ruleProblem($0, field) }
-                let missing = problems.filter { $0 == .missing }.count
-                let duplicates = problems.count - missing
                 if problems.isEmpty {
                     Label("Every record follows the rules.", systemImage: "checkmark.circle").foregroundStyle(.secondary)
                 } else {
-                    if missing > 0 {
-                        Label("\(missing) record\(missing == 1 ? " is" : "s are") empty", systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+                    // Counted per kind: "2 are empty", "3 are above 100".
+                    let counts = Dictionary(grouping: problems) { problem -> String in
+                        switch problem {
+                        case .missing: "empty"
+                        case .duplicate: "the same as another record"
+                        default: problem.message.lowercased()
+                        }
                     }
-                    if duplicates > 0 {
-                        Label("\(duplicates) records share a value with another", systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+                    ForEach(counts.keys.sorted(), id: \.self) { kind in
+                        let n = counts[kind]?.count ?? 0
+                        Label("\(n) record\(n == 1 ? " is" : "s are") \(kind)", systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
                     }
                 }
             }
@@ -495,16 +532,37 @@ struct SheetUndoButtons: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Button { document.undoManager?.undo() } label: { Image(systemName: "arrow.uturn.backward") }
+            Button { Self.undo(document) } label: { Image(systemName: "arrow.uturn.backward") }
                 .keyboardShortcut("z", modifiers: .command)
                 .help("Undo (⌘Z)")
-            Button { document.undoManager?.redo() } label: { Image(systemName: "arrow.uturn.forward") }
+            Button { Self.redo(document) } label: { Image(systemName: "arrow.uturn.forward") }
                 .keyboardShortcut("z", modifiers: [.command, .shift])
                 .help("Redo (⇧⌘Z)")
         }
     }
 }
 
+
+extension SheetUndoButtons {
+    /// While typing in the sheet, ⌘Z undoes the typing; otherwise the document's last change.
+    static func undo(_ document: GolleDocument) {
+        if let window = NSApp.keyWindow, window.firstResponder is NSText, let typing = window.undoManager,
+           typing !== document.undoManager, typing.canUndo {
+            typing.undo()
+        } else {
+            document.undoManager?.undo()
+        }
+    }
+
+    static func redo(_ document: GolleDocument) {
+        if let window = NSApp.keyWindow, window.firstResponder is NSText, let typing = window.undoManager,
+           typing !== document.undoManager, typing.canRedo {
+            typing.redo()
+        } else {
+            document.undoManager?.redo()
+        }
+    }
+}
 
 /// The options of a choice field: rename, colour, reorder, add and remove.
 private struct OptionsSection: View {
@@ -597,5 +655,71 @@ private struct OptionName: View {
         let trimmed = text.trimmingCharacters(in: .whitespaces)
         if !trimmed.isEmpty, trimmed != option, !choices.contains(trimmed) { rename(option, trimmed) }
         else { text = option }
+    }
+}
+
+/// A number for a rule (a minimum or a maximum), saved when editing ends; empty is no limit.
+private struct RuleNumberField: View {
+    let prompt: String
+    let value: Double?
+    let save: (Double?) -> Void
+    @State private var draft = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        TextField(prompt, text: $draft, prompt: Text(prompt))
+            .labelsHidden()
+            .frame(width: 90)
+            .multilineTextAlignment(.trailing)
+            .focused($focused)
+            .onAppear { draft = value.map(Value.plain) ?? "" }
+            .onChange(of: value) { _, new in if !focused { draft = new.map(Value.plain) ?? "" } }
+            .onSubmit(commit)
+            .onChange(of: focused) { _, now in if !now { commit() } }
+            .onDisappear(perform: commit)
+    }
+
+    private func commit() {
+        let text = draft.trimmingCharacters(in: .whitespaces)
+        if text.isEmpty { if value != nil { save(nil) }; return }
+        if let n = Value.parseNumber(text) { if n != value { save(n) }; draft = Value.plain(n) }
+        else { NSSound.beep(); draft = value.map(Value.plain) ?? "" }
+    }
+}
+
+/// The pattern text must match: a ready-made one, or one of your own (a regular expression).
+private struct PatternRule: View {
+    let pattern: String?
+    let name: String?
+    let save: (_ pattern: String?, _ name: String?) -> Void
+    @State private var custom = ""
+    @FocusState private var focused: Bool
+
+    private static let customName = "Your own pattern"
+
+    private var preset: TextPattern? { TextPattern.allCases.first { $0.regex == pattern } }
+
+    var body: some View {
+        Picker("Must be", selection: Binding(get: { pattern == nil ? "" : preset?.name ?? Self.customName }, set: { choice in
+            if choice.isEmpty { save(nil, nil) }
+            else if let p = TextPattern.allCases.first(where: { $0.name == choice }) { save(p.regex, p.name) }
+            else { save(custom.isEmpty ? "" : custom, Self.customName) }
+        })) {
+            Text("Anything").tag("")
+            ForEach(TextPattern.allCases) { Text($0.name).tag($0.name) }
+            Divider()
+            Text(Self.customName).tag(Self.customName)
+        }
+        if pattern != nil, preset == nil {
+            TextField("Pattern", text: $custom, prompt: Text("a regular expression, e.g. ^INV-[0-9]+$"))
+                .font(.body.monospaced())
+                .focused($focused)
+                .onAppear { custom = pattern ?? "" }
+                .onSubmit { save(custom, Self.customName) }
+                .onChange(of: focused) { _, now in if !now { save(custom, Self.customName) } }
+            if !custom.isEmpty, !TextPattern.isValid(custom) {
+                Label("This isn't a pattern Golle can read, so it isn't checked.", systemImage: "exclamationmark.triangle").foregroundStyle(.orange).font(.caption)
+            }
+        }
     }
 }

@@ -79,7 +79,7 @@ struct ImportSheet: View {
     }
 
     private func typePicker(_ index: Int) -> some View {
-        Picker("Type", selection: Binding(get: { index < types.count ? types[index] : nil }, set: { if index < types.count { types[index] = $0 } })) {
+        Picker("Type", selection: Binding(get: { index < types.count ? types[index] : nil }, set: { if index < types.count { types[index] = $0; chosen.insert(index) } })) {
             Text("Skip").tag(FieldType?.none)
             Divider()
             ForEach(FieldType.allCases.filter { !$0.isAttachment && $0 != .link && !$0.isComputed }) { type in
@@ -90,7 +90,7 @@ struct ImportSheet: View {
     }
 
     private func targetPicker(_ index: Int) -> some View {
-        Picker("Field", selection: Binding(get: { index < targets.count ? targets[index] : nil }, set: { if index < targets.count { targets[index] = $0 } })) {
+        Picker("Field", selection: Binding(get: { index < targets.count ? targets[index] : nil }, set: { if index < targets.count { targets[index] = $0; chosen.insert(index) } })) {
             Text("Skip").tag(UUID?.none)
             Text("New Field").tag(UUID?.some(Self.newField))
             Divider()
@@ -101,7 +101,11 @@ struct ImportSheet: View {
         .labelsHidden()
     }
 
+    /// Columns whose type or field was chosen by hand.
+    @State private var chosen = Set<Int>()
+
     private func load() {
+        chosen = []
         do {
             let accessing = url.startAccessingSecurityScopedResource()
             defer { if accessing { url.stopAccessingSecurityScopedResource() } }
@@ -122,10 +126,15 @@ struct ImportSheet: View {
         guess()
     }
 
+    /// Guesses each column's type and field. Columns chosen by hand keep their choice (switching
+    /// "first row is a header" guesses again, but only for the others).
     private func guess() {
-        types = Value.$decimalSeparator.withValue(decimalSeparator) { (0..<columnCount).map { Importer.guessType(values($0)) } }
+        let guessed = Value.$decimalSeparator.withValue(decimalSeparator) { (0..<columnCount).map { Importer.guessType(values($0)) } }
+        types = guessed.enumerated().map { i, type in chosen.contains(i) && i < types.count ? types[i] : type }
+        let previous = targets
         targets = (0..<columnCount).map { index in
-            current?.field(named: header(index)).map(\.id) ?? Self.newField
+            if chosen.contains(index), index < previous.count { return previous[index] }
+            return current?.field(named: header(index)).map(\.id) ?? Self.newField
         }
     }
 

@@ -12,7 +12,6 @@ struct RecordForm: View {
 
     var body: some View {
         Form {
-            RulesSection(document: document, table: table, record: record, resolver: resolver)
             Section {
                 ForEach(table.fields) { field in
                     FieldInput(document: document, table: table, record: record, field: field, resolver: resolver)
@@ -24,6 +23,9 @@ struct RecordForm: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            // Below the fields: appearing and going while a required or unique field is typed in, it
+            // would move the fields under the cursor.
+            RulesSection(document: document, table: table, record: record, resolver: resolver)
             BacklinksSection(document: document, record: record, resolver: resolver)
             HistorySection(document: document, table: table, record: record)
         }
@@ -46,7 +48,7 @@ struct RulesSection: View {
                 ForEach(problems, id: \.field.id) { field, problem in
                     VStack(alignment: .leading, spacing: 3) {
                         Label {
-                            Text(problem == .missing ? "\(field.name) is required" : "\(field.name) is the same as in another record")
+                            Text(problem.sentence(field))
                         } icon: {
                             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                         }
@@ -71,32 +73,160 @@ struct RulesSection: View {
     }
 }
 
-/// Records in other tables that link to this one.
+/// Records in other tables that link to this one, each table as a small editable table: an
+/// album's tracks, a recipe's ingredients, a project's tasks. Cells are edited in place, "+" adds a
+/// record that already links here, and the table's totals show underneath.
 struct BacklinksSection: View {
     @ObservedObject var document: GolleDocument
     let record: Record
     let resolver: Resolver
 
     var body: some View {
-        let backlinks = resolver.backlinks(to: record)
-        if !backlinks.isEmpty {
-            Section("Linked From") {
-                ForEach(backlinks, id: \.field.id) { link in
-                    LabeledContent("\(link.table.name) · \(link.field.name)") {
-                        VStack(alignment: .trailing) {
-                            ForEach(link.records) { other in
-                                Button(link.table.title(of: other)) { show(other.id, in: link.table.id) }
-                                    .buttonStyle(.link)
-                            }
+        // Every link field pointing at this table, also when nothing links yet: that is where the
+        // first one is added.
+        let links = resolver.database.tables.flatMap { other in
+            other.fields.filter { $0.type == .link && ($0.options.linkedTableID ?? other.id) == resolver.table.id }.map { (table: other, field: $0) }
+        }
+        ForEach(links, id: \.field.id) { link in
+            let several = links.filter { $0.table.id == link.table.id }.count > 1
+            RelatedRecords(document: document, record: record, table: link.table, link: link.field,
+                           resolver: resolver.resolver(for: link.table), title: several ? "\(link.table.name) · \(link.field.name)" : link.table.name)
+        }
+    }
+}
+
+/// The records of one table that link to a record, through one link field.
+struct RelatedRecords: View {
+    @ObservedObject var document: GolleDocument
+    let record: Record
+    /// The table the related records are in, and its link field pointing here.
+    let table: DataTable
+    let link: Field
+    let resolver: Resolver
+    let title: String
+
+    /// Shown at most; the rest are a click away in their table.
+    static let limit = 50
+
+    /// The columns: the record's name first, then the next short fields, as many as fit beside it.
+    static func columns(_ table: DataTable, link: Field) -> [Field] {
+        let short = table.fields.filter { field in
+            field.id != link.id && ![.longText, .image, .file, .checklist, .location, .link].contains(field.type)
+        }
+        let title = table.titleField.flatMap { t in short.first { $0.id == t.id } }
+        return Array(([title].compactMap { $0 } + short.filter { $0.id != title?.id }).prefix(3))
+    }
+
+    var body: some View {
+        let related = table.records.filter { $0[link.id]?.links.contains(record.id) == true }
+        let columns = Self.columns(table, link: link)
+        Section {
+            if !related.isEmpty {
+                VStack(spacing: 0) {
+                    HStack(spacing: 8) {
+                        ForEach(Array(columns.enumerated()), id: \.element.id) { i, field in
+                            Text(field.name).lineLimit(1)
+                                .frame(maxWidth: i == 0 ? .infinity : 90, alignment: Self.alignsRight(field) ? .trailing : .leading)
                         }
+                        Color.clear.frame(width: 20, height: 1)
                     }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.bottom, 4)
+                    ForEach(related.prefix(Self.limit)) { other in
+                        Divider()
+                        row(other, columns: columns)
+                    }
+                    if related.count > Self.limit {
+                        Divider()
+                        Button("and \(related.count - Self.limit) more in \(table.name)") { show(related[Self.limit].id) }
+                            .buttonStyle(.link)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.top, 6)
+                    }
+                    totals(related, columns: columns)
                 }
+            }
+            Button {
+                add()
+            } label: {
+                Label(related.isEmpty ? "Add a Record to \(table.name)" : "Add to \(table.name)", systemImage: "plus")
+            }
+            .buttonStyle(.borderless)
+            .help("A new record in \(table.name), linked to \(resolver.database.table(link.options.linkedTableID ?? table.id)?.title(of: record) ?? "this record")")
+        } header: {
+            HStack {
+                Text(title)
+                if !related.isEmpty { Text("\(related.count)").foregroundStyle(.secondary).monospacedDigit() }
             }
         }
     }
 
-    private func show(_ id: Record.ID, in table: DataTable.ID) {
-        document.selectedTableID = table
+    private func row(_ other: Record, columns: [Field]) -> some View {
+        HStack(spacing: 8) {
+            ForEach(Array(columns.enumerated()), id: \.element.id) { i, field in
+                EditableCell(document: document, table: table, field: field, record: other, resolver: resolver)
+                    .frame(maxWidth: i == 0 ? .infinity : 90, alignment: Self.alignsRight(field) ? .trailing : .leading)
+            }
+            Menu {
+                Button("Show in \(table.name)") { show(other.id) }
+                Divider()
+                Button("Unlink") { unlink(other) }
+                Button("Delete Record", role: .destructive) { document.deleteRecords([other.id], from: table.id) }
+            } label: {
+                Image(systemName: "ellipsis.circle").foregroundStyle(.secondary)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .frame(width: 20)
+            .help("Show, unlink or delete \(table.title(of: other))")
+        }
+        .frame(minHeight: 24)
+    }
+
+    /// The table's totals (the Σ under its records) for the columns shown, over these records.
+    @ViewBuilder
+    private func totals(_ records: [Record], columns: [Field]) -> some View {
+        let items = columns.map { field in table.summaries.first { $0.fieldID == field.id } }
+        if items.contains(where: { $0 != nil }) {
+            Divider()
+            HStack(spacing: 8) {
+                ForEach(Array(columns.enumerated()), id: \.element.id) { i, field in
+                    Group {
+                        if let item = items[i] {
+                            Text(item.kind.compute(records.map { resolver.value($0, field) }, field: resolver.formatField(field)))
+                                .help("\(item.kind.label) of \(field.name)")
+                        } else {
+                            Text(i == 0 ? "Total" : "")
+                        }
+                    }
+                    .fontWeight(.semibold)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .frame(maxWidth: i == 0 ? .infinity : 90, alignment: Self.alignsRight(field) ? .trailing : .leading)
+                }
+                Color.clear.frame(width: 20, height: 1)
+            }
+            .padding(.top, 6)
+        }
+    }
+
+    static func alignsRight(_ field: Field) -> Bool {
+        field.type.isNumeric || field.type == .duration || field.type == .formula || field.type == .rollup
+    }
+
+    private func add() {
+        _ = document.addRecord(to: table.id, values: [link.id: .links([record.id])])
+    }
+
+    private func unlink(_ other: Record) {
+        let rest = (other[link.id]?.links ?? []).filter { $0 != record.id }
+        document.setValue(rest.isEmpty ? nil : .links(rest), record: other.id, field: link.id, table: table.id)
+    }
+
+    private func show(_ id: Record.ID) {
+        document.selectedTableID = table.id
         document.selectedRecordIDs = [id]
     }
 }
@@ -159,10 +289,9 @@ struct FieldEditorRow: View {
             }
         case .number:
             labeled {
-                // No thousands separator while editing: years and ids are numbers too.
-                TextField(field.name, value: number, format: .number.grouping(.never))
-                    .labelsHidden()
-                    .multilineTextAlignment(.trailing)
+                // Typed as text and saved when editing ends: also when another record is shown
+                // before Return (a number field saves only then on its own).
+                NumberInput(field: field, value: $value)
             }
         case .date:
             labeled {
@@ -187,10 +316,10 @@ struct FieldEditorRow: View {
         case .barcode:
             labeled {
                 // Stored without spaces and dashes, however it is typed or pasted.
-                ActionTextInput(document: document, field: field, text: Binding(
-                    get: { value?.text ?? "" },
-                    set: { value = Value.text($0).converted(to: .barcode) }
-                ))
+                CleanedText(stored: value?.text ?? "", save: { value = Value.text($0).converted(to: .barcode) },
+                            clean: { Value.text($0).converted(to: .barcode)?.text ?? "" }) { text in
+                    ActionTextInput(document: document, field: field, text: text)
+                }
             }
         case .duration:
             labeled {
@@ -619,6 +748,7 @@ struct LinkPicker: View {
     var showsLinked = true
     let done: () -> Void
     @State private var search = ""
+    @FocusState private var searchFocused: Bool
 
     var body: some View {
         let linkedIDs = value?.links ?? []
@@ -648,6 +778,12 @@ struct LinkPicker: View {
             TextField("Search \(target.name)", text: $search)
                 .textFieldStyle(.roundedBorder)
                 .padding(8)
+                .focused($searchFocused)
+                // Return links the first match.
+                .onSubmit {
+                    if let first = candidates.first { value = .links((value?.links ?? []) + [first.id]); search = "" }
+                }
+                .onAppear { DispatchQueue.main.async { searchFocused = true } }
             List(candidates.prefix(200)) { candidate in
                 Button(target.title(of: candidate)) {
                     value = .links((value?.links ?? []) + [candidate.id])
@@ -663,7 +799,8 @@ struct LinkPicker: View {
                     done()
                 }
                 Spacer()
-                Button("Done", action: done).keyboardShortcut(.defaultAction)
+                // Not Return: that links the first match while searching.
+                Button("Done", action: done)
             }
             .padding(8)
         }
@@ -707,6 +844,16 @@ struct BatchForm: View {
                                                get: { mixed ? nil : values[0] },
                                                set: { document.setValue($0, records: ids, field: field.id, table: table.id, typing: true) }
                                            ))
+                            // Mixed values show as empty, so choosing "None" or clearing changes
+                            // nothing: this empties the field in every selected record.
+                            if mixed {
+                                Button("Clear \(field.name) in All", systemImage: "xmark.circle") {
+                                    document.setValue(nil, records: ids, field: field.id, table: table.id)
+                                }
+                                .buttonStyle(.borderless)
+                                .foregroundStyle(.secondary)
+                                .font(.caption)
+                            }
                         }
                     }
                 }

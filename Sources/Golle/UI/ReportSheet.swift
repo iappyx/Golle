@@ -268,14 +268,18 @@ struct ReportSheet: View {
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("Save PDF…") {
+                    // As set now, even if the preview hasn't caught up with the last change.
+                    render()
                     if let pdf { Exporting.save(pdf, name: "\(fileName).pdf", type: .pdf) }
                 }
                 .disabled(pdf == nil)
                 Button("Print…") {
+                    render()
                     if let pdf {
+                        let title = options.title
                         dismiss()
                         // After the sheet has gone: the print panel opens on the window.
-                        DispatchQueue.main.async { Printing.print(pdf, title: options.title) }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { Printing.print(pdf, title: title) }
                     }
                 }
                 .keyboardShortcut(.defaultAction)
@@ -403,7 +407,12 @@ private struct PDFPreview: NSViewRepresentable {
     func updateNSView(_ view: PDFView, context: Context) {
         guard context.coordinator.shown != data else { return }
         context.coordinator.shown = data
+        // Drawn again after a change: stay on the page being looked at.
+        let page = view.currentPage.flatMap { view.document?.index(for: $0) }
         view.document = data.flatMap(PDFDocument.init(data:))
+        if let page, let document = view.document, page < document.pageCount, let target = document.page(at: page) {
+            view.go(to: target)
+        }
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }

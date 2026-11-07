@@ -49,7 +49,9 @@ final class GolleDocument: ReferenceFileDocument {
 
     /// A value computed once per revision of the database, e.g. the records a view shows.
     func memo<T>(_ key: String, _ make: () -> T) -> T {
-        if let hit = cache[key] as? T { return hit }
+        // Only a value that is there: for an optional result, a missing one would cast to nil and
+        // read as "worked out, and empty".
+        if let stored = cache[key], let hit = stored as? T { return hit }
         let value = make()
         cache[key] = value
         return value
@@ -66,6 +68,8 @@ final class GolleDocument: ReferenceFileDocument {
     // Window state, not saved.
     @Published var selectedTableID: DataTable.ID? { didSet { if oldValue != selectedTableID { selectedViewID = nil; resetWindowState() } } }
     @Published var selectedViewID: SavedView.ID? { didSet { if oldValue != selectedViewID { resetWindowState() } } }
+    /// The cells selected in the table, in the order shown: what Fill Down in the menu works on.
+    var cellBlock: (table: DataTable.ID, records: [Record.ID], fields: [Field.ID])?
     @Published var selectedRecordIDs = Set<Record.ID>() {
         // Moving to another record starts a new undo step, even in the same field.
         didSet { if oldValue != selectedRecordIDs { coalescingKey = nil } }
@@ -534,19 +538,93 @@ final class GolleDocument: ReferenceFileDocument {
         selectedRecordIDs = Set(copies.map(\.id))
     }
 
+    /// The field types whose edits are typing (or dragging a slider): one undo step while it goes on.
+    static let typedTypes: Set<FieldType> = [.text, .longText, .number, .url, .email, .phone, .barcode, .duration, .progress, .date]
+
     func setValue(_ value: Value?, record recordID: Record.ID, field fieldID: Field.ID, table tableID: DataTable.ID) {
         guard let t = database.tableIndex(tableID), let r = database.tables[t].recordIndex(recordID) else { return }
         let old = database.tables[t].records[r][fieldID]
         let stored: Value? = value?.isEmpty == true ? nil : value
         guard old != stored else { return }
-        let key = "cell-\(recordID)-\(fieldID)"
-        // Typing on in the same cell extends the same history entry, as it extends the same undo step.
-        let continuing = continues(key)
+        // Typing on in the same cell extends the same history entry, as it extends the same undo
+        // step. Clicks (a tick, a choice, a file) are each their own.
+        let typed = database.tables[t].field(fieldID).map { Self.typedTypes.contains($0.type) } ?? false
+        let key: String? = typed ? "cell-\(recordID)-\(fieldID)" : nil
+        let continuing = key.map(continues) ?? false
         change("Edit", coalesce: key, known: true) { db in
             db.tables[t].records[r][fieldID] = value
             db.tables[t].records[r].modified = .stamp()
             db.tables[t].recordChange(recordID, field: fieldID, old: old, new: stored, continuing: continuing)
         }
+    }
+
+    /// Pastes cells: changes existing records, adds records for the rows past the last one, and
+    /// adds options new to choice fields. One undo step; every changed cell is in its record's
+    /// history. Returns the records pasted into, in order.
+    @discardableResult
+    func paste(_ paste: CellClipboard.Paste, into tableID: DataTable.ID, actionName: String? = nil) -> [Record.ID] {
+        guard !paste.isEmpty, let t = database.tableIndex(tableID) else { return [] }
+        var touched: [Record.ID] = []
+        let added = paste.added.map { Self.newRecord(in: database.tables[t], values: $0) }
+        change(actionName ?? (paste.added.isEmpty ? "Paste" : "Paste Records")) { db in
+            for (fieldID, choices) in paste.newChoices {
+                if let f = db.tables[t].fieldIndex(fieldID) { db.tables[t].fields[f].options.choices += choices }
+            }
+            for update in paste.updates {
+                guard let r = db.tables[t].recordIndex(update.record) else { continue }
+                let old = db.tables[t].records[r][update.field]
+                let new: Value? = update.value?.isEmpty == true ? nil : update.value
+                if !touched.contains(update.record) { touched.append(update.record) }
+                guard old != new else { continue }
+                db.tables[t].records[r][update.field] = new
+                db.tables[t].records[r].modified = .stamp()
+                db.tables[t].recordChange(update.record, field: update.field, old: old, new: new, continuing: false)
+            }
+            // New records numbered one after another (auto numbers).
+            var next = db.tables[t]
+            for record in added {
+                var record = record
+                for field in next.fields where field.type == .autoNumber { record[field.id] = .number(next.nextNumber(for: field.id)) }
+                next.records.append(record)
+                db.tables[t].records.append(record)
+            }
+        }
+        return touched + added.map(\.id)
+    }
+
+    /// Copies the first record's values of the fields to the others (Fill Down). One undo step.
+    func fillDown(fields fieldIDs: [Field.ID], records ids: [Record.ID], table tableID: DataTable.ID) {
+        guard ids.count > 1, let t = database.tableIndex(tableID), let r0 = database.tables[t].recordIndex(ids[0]) else { return }
+        // Every field you fill in yourself, photos and files too (they are shared, as Duplicate does).
+        let fields = fieldIDs.compactMap { database.tables[t].field($0) }.filter(CellClipboard.canClear)
+        var paste = CellClipboard.Paste()
+        for id in ids.dropFirst() {
+            guard let r = database.tables[t].recordIndex(id) else { continue }
+            for field in fields where database.tables[t].records[r][field.id] != database.tables[t].records[r0][field.id] {
+                paste.updates.append((id, field.id, database.tables[t].records[r0][field.id]))
+            }
+        }
+        guard !paste.updates.isEmpty else { return }
+        self.paste(paste, into: tableID, actionName: "Fill Down")
+    }
+
+    /// Fill Down in one field.
+    func fillDown(field fieldID: Field.ID, records ids: [Record.ID], table tableID: DataTable.ID) {
+        fillDown(fields: [fieldID], records: ids, table: tableID)
+    }
+
+    /// Empties cells (Delete on a block of cells), photos and files too. Formulas and automatic
+    /// fields stay. One undo step.
+    func clearCells(records ids: [Record.ID], fields fieldIDs: [Field.ID], table tableID: DataTable.ID) {
+        guard let t = database.tableIndex(tableID) else { return }
+        let fields = fieldIDs.compactMap { database.tables[t].field($0) }.filter(CellClipboard.canClear)
+        var paste = CellClipboard.Paste()
+        for id in ids {
+            guard let r = database.tables[t].recordIndex(id) else { continue }
+            for field in fields where database.tables[t].records[r][field.id] != nil { paste.updates.append((id, field.id, nil)) }
+        }
+        guard !paste.updates.isEmpty else { return }
+        self.paste(paste, into: tableID, actionName: paste.updates.count == 1 ? "Clear Cell" : "Clear Cells")
     }
 
     /// Moves a record's dates by whole days, keeping their time of day: the start and end together

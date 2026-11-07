@@ -190,6 +190,13 @@ struct FieldOptions: Codable, Equatable, Hashable {
     /// are shown, not enforced: the user's data is never refused.
     var required = false
     var unique = false
+    /// Value rules: numbers between a minimum and a maximum, dates not in the future or the past,
+    /// text matching a pattern (a regular expression, with a name for the messages).
+    var minimum: Double?
+    var maximum: Double?
+    var dateLimit: DateLimit?
+    var pattern: String?
+    var patternName: String?
 
     init(choices: [String] = [], linkedTableID: UUID? = nil, formula: String = "", numberFormat: NumberFormat? = nil, defaultValue: String = "") {
         self.choices = choices
@@ -215,6 +222,11 @@ struct FieldOptions: Codable, Equatable, Hashable {
         rollupKind = (try? c.decodeIfPresent(RollupKind.self, forKey: .rollupKind)) ?? .count
         required = try c.decodeIfPresent(Bool.self, forKey: .required) ?? false
         unique = try c.decodeIfPresent(Bool.self, forKey: .unique) ?? false
+        minimum = try c.decodeIfPresent(Double.self, forKey: .minimum)
+        maximum = try c.decodeIfPresent(Double.self, forKey: .maximum)
+        dateLimit = try? c.decodeIfPresent(DateLimit.self, forKey: .dateLimit)
+        pattern = try c.decodeIfPresent(String.self, forKey: .pattern)
+        patternName = try c.decodeIfPresent(String.self, forKey: .patternName)
     }
 }
 
@@ -312,5 +324,46 @@ struct Lossy<Element: Decodable>: Decodable {
         while !container.isAtEnd {
             if let item = try? container.decode(Element.self) { items.append(item) } else { _ = try? container.decode(Skip.self) }
         }
+    }
+}
+
+/// Which dates a date field takes.
+enum DateLimit: String, Codable, CaseIterable, Identifiable {
+    case notFuture, notPast
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .notFuture: "Not in the future"
+        case .notPast: "Not in the past"
+        }
+    }
+}
+
+/// Ready-made patterns for text rules.
+enum TextPattern: CaseIterable, Identifiable {
+    case digits, lettersAndDigits, dutchPostcode, email, capital
+    var id: String { name }
+    var name: String {
+        switch self {
+        case .digits: "Digits only"
+        case .lettersAndDigits: "Letters and digits only"
+        case .dutchPostcode: "Dutch postcode (1234 AB)"
+        case .email: "Email address"
+        case .capital: "Starts with a capital"
+        }
+    }
+    var regex: String {
+        switch self {
+        case .digits: "^[0-9]+$"
+        case .lettersAndDigits: "^[\\p{L}0-9]+$"
+        case .dutchPostcode: "^[1-9][0-9]{3} ?[A-Za-z]{2}$"
+        case .email: "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
+        case .capital: "^\\p{Lu}"
+        }
+    }
+
+    /// Whether a pattern can be used: an empty or broken one is no rule.
+    static func isValid(_ pattern: String) -> Bool {
+        !pattern.isEmpty && (try? NSRegularExpression(pattern: pattern)) != nil
     }
 }

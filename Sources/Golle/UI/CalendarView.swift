@@ -97,9 +97,25 @@ private struct DayCell: View {
     let records: [Record]
     let resolver: Resolver
     @State private var targeted = false
+    @State private var showingAll = false
 
     private var isToday: Bool { Calendar.current.isDateInToday(day) }
     private var editable: Bool { field.type == .date }
+
+    private func chip(_ record: Record) -> some View {
+        let color = table.color(of: record, resolver)?.color ?? .accentColor
+        let selected = document.selectedRecordIDs.contains(record.id)
+        return Text(table.title(of: record))
+            .font(.caption)
+            .lineLimit(1)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 1)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(color.opacity(selected ? 0.45 : 0.2), in: .rect(cornerRadius: 3))
+            .contentShape(.rect)
+            .onTapGesture { document.selectedRecordIDs = [record.id] }
+            .modifier(DraggableIf(enabled: editable, id: record.id.uuidString))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -109,27 +125,30 @@ private struct DayCell: View {
                 .padding(.horizontal, 5)
                 .padding(.vertical, 1)
                 .background(isToday ? Color.accentColor : .clear, in: .capsule)
-            ForEach(records.prefix(4)) { record in
-                let color = table.color(of: record, resolver)?.color ?? .accentColor
-                let selected = document.selectedRecordIDs.contains(record.id)
-                Text(table.title(of: record))
-                    .font(.caption)
-                    .lineLimit(1)
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(color.opacity(selected ? 0.45 : 0.2), in: .rect(cornerRadius: 3))
-                    .contentShape(.rect)
-                    .onTapGesture { document.selectedRecordIDs = [record.id] }
-                    .modifier(DraggableIf(enabled: editable, id: record.id.uuidString))
-            }
+            ForEach(records.prefix(4)) { record in chip(record) }
             if records.count > 4 {
-                Text("\(records.count - 4) more").font(.caption2).foregroundStyle(.secondary)
+                // The rest in a list: each one can be selected and dragged to another day.
+                Button("\(records.count - 4) more") { showingAll = true }
+                    .buttonStyle(.link)
+                    .font(.caption2)
+                    .popover(isPresented: $showingAll, arrowEdge: .bottom) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(day.formatted(date: .complete, time: .omitted)).font(.headline).padding(.bottom, 4)
+                            ScrollView {
+                                VStack(alignment: .leading, spacing: 3) { ForEach(records) { chip($0) } }
+                            }
+                            .frame(maxHeight: 320)
+                        }
+                        .padding(12)
+                        .frame(width: 240)
+                    }
             }
             Spacer(minLength: 0)
         }
         .padding(3)
         .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .topLeading)
+        // In a short window the chips stay in their day (and clicks and drops on them too).
+        .clipped()
         .background(targeted ? Color.accentColor.opacity(0.15) : inMonth ? Color.clear : Color.secondary.opacity(0.06))
         .overlay(alignment: .topLeading) { Rectangle().strokeBorder(Color.secondary.opacity(0.15), lineWidth: 0.5) }
         .contentShape(.rect)

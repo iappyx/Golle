@@ -42,7 +42,7 @@ struct ColorRulesSheet: View {
             HStack {
                 SheetUndoButtons(document: document)
                 Spacer()
-                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+                Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
             }
             .padding(12)
         }
@@ -187,7 +187,7 @@ struct DuplicatesSheet: View {
                     Spacer()
                     Button("Merge All (\(groups.count))") { document.mergeDuplicates(groups, in: tableID) }
                         .disabled(groups.isEmpty)
-                    Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+                    Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
                 }
                 .padding(12)
             }

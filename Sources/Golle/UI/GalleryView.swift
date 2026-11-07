@@ -10,11 +10,9 @@ struct GalleryView: View {
     var groupFields: [Field] = []
     /// The view's visible fields; cards show the first few.
     var visible: [Field] = []
+    /// Shows a record (double-click): in the inspector, without changing the view.
+    var open: (Record.ID) -> Void = { _ in }
     @State private var anchor: Record.ID?
-    /// The keys held when a card was pressed. The click itself is handled only after the
-    /// double-click time, when ⌘ or ⇧ may already be let go.
-    @State private var pressKeys: NSEvent.ModifierFlags = []
-    @State private var pressing = false
     @State private var collapsed = Set<String>()
 
     /// Groups as flat sections; with two levels a section is "Group › Subgroup".
@@ -40,6 +38,7 @@ struct GalleryView: View {
                     }
                 }
                 .padding(14)
+                .background(clearsSelection)
             } else {
                 LazyVStack(alignment: .leading, spacing: 10, pinnedViews: [.sectionHeaders]) {
                     ForEach(sections, id: \.id) { section in
@@ -69,12 +68,23 @@ struct GalleryView: View {
                     }
                 }
                 .padding(14)
+                .background(clearsSelection)
             }
         }
         .frame(minWidth: 0, maxWidth: .infinity)
+        // Below the cards too: the empty rest of the window.
+        .background(clearsSelection)
         .background(.background)
-        .onTapGesture { document.selectedRecordIDs = [] }
         .onDeleteCommand { document.deleteRecords(document.selectedRecordIDs, from: table.id) }
+    }
+
+    /// A click on the space between and around the cards clears the selection. It sits behind
+    /// the cards rather than around them: a tap handler around them would answer a click on a card
+    /// first (the card's own waits to see whether it is a double-click) and clear what the card selects.
+    private var clearsSelection: some View {
+        Color.clear
+            .contentShape(.rect)
+            .onTapGesture { document.selectedRecordIDs = [] }
     }
 
     private func card(_ record: Record) -> some View {
@@ -123,22 +133,16 @@ struct GalleryView: View {
                 .strokeBorder(selected ? Color.accentColor : Color.secondary.opacity(0.2), lineWidth: selected ? 3 : 1)
         }
         .contentShape(.rect)
-        .onTapGesture(count: 2) {
-            document.selectedRecordIDs = [record.id]
-            document.updateCurrentView("Change View") { $0.mode = .layout }
-        }
-        .simultaneousGesture(DragGesture(minimumDistance: 0)
-            .onChanged { _ in
-                if !pressing { pressing = true; pressKeys = NSEvent.modifierFlags }
-            }
-            .onEnded { _ in pressing = false })
-        // One click handler that reads the keys held at the press, so ⌘ and ⇧ don't race a plain click.
-        .onTapGesture {
-            let keys = pressKeys
-            if keys.contains(.command) { toggle(record.id) }
-            else if keys.contains(.shift) { extend(to: record.id) }
-            else { document.selectedRecordIDs = [record.id]; anchor = record.id }
-        }
+        // One gesture, tried in order: a double-click opens the record; otherwise a click with ⌘
+        // adds or removes the card, with ⇧ selects up to it, and a plain click selects it. The keys
+        // are checked by the gesture itself, when the card is clicked. (A drag that noted the keys
+        // on mouse-down took the click away from the tap, so cards couldn't be selected.)
+        .gesture(
+            TapGesture(count: 2).onEnded { open(record.id) }
+            .exclusively(before: TapGesture().modifiers(.command).onEnded { toggle(record.id) })
+            .exclusively(before: TapGesture().modifiers(.shift).onEnded { extend(to: record.id) })
+            .exclusively(before: TapGesture().onEnded { document.selectedRecordIDs = [record.id]; anchor = record.id })
+        )
         .contextMenu {
             Button("Duplicate") { document.duplicateRecords(selection(including: record.id), in: table.id) }
             Button("Delete", role: .destructive) { document.deleteRecords(selection(including: record.id), from: table.id) }

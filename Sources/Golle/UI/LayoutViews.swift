@@ -17,6 +17,9 @@ struct LayoutBrowser: View {
     private var current: Record? {
         let selected = document.selectedRecordIDs
         if !selected.isEmpty, let record = rows.first(where: { selected.contains($0.id) }) { return record }
+        // An edit put the record outside the view's filter: it stays shown (jumping to another one
+        // while typing would lose the typing).
+        if let id = selected.first, selected.count == 1, let record = table.records.first(where: { $0.id == id }) { return record }
         return rows.first
     }
 
@@ -232,7 +235,9 @@ struct LayoutEditor: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var selection: LayoutItem.ID?
-    @State private var dragStart: CGRect?
+    /// The item being dragged and where it was: a drag that was cancelled (and never ended) is not
+    /// taken for the start of the next one.
+    @State private var dragStart: (item: LayoutItem.ID, frame: CGRect, at: CGPoint)?
     @State private var gestureKey = UUID()
 
     private var table: DataTable? { document.database.table(tableID) }
@@ -399,12 +404,12 @@ struct LayoutEditor: View {
         // own coordinates would feed every step back into the next.
         DragGesture(minimumDistance: 2, coordinateSpace: .named(Self.page))
             .onChanged { value in
-                if dragStart == nil {
-                    dragStart = item.frame
+                if dragStart?.item != item.id || dragStart?.at != value.startLocation {
+                    dragStart = (item.id, item.frame, value.startLocation)
                     gestureKey = UUID()
                     selection = item.id
                 }
-                guard let start = dragStart, var l = self.layout, let index = l.items.firstIndex(where: { $0.id == item.id }) else { return }
+                guard let start = dragStart?.frame, var l = self.layout, let index = l.items.firstIndex(where: { $0.id == item.id }) else { return }
                 var moved = l.items[index]
                 if resize {
                     moved.width = start.width + value.translation.width
@@ -418,7 +423,7 @@ struct LayoutEditor: View {
                 update(l, resize ? "Resize" : "Move", coalesce: "drag-\(gestureKey)")
             }
             .onEnded { _ in
-                if !resize, let start = dragStart, var l = self.layout {
+                if !resize, let start = dragStart?.frame, var l = self.layout {
                     l.settle(item.id, from: start)
                     update(l, "Move", coalesce: "drag-\(gestureKey)")
                 }

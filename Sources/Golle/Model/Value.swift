@@ -88,6 +88,12 @@ enum FieldType: String, CaseIterable, Identifiable, Codable {
     var canBeRequired: Bool { !isAutomatic && self != .checkbox }
     /// Whether values can be required to differ between records.
     var canBeUnique: Bool { isTextLike || [.number, .date, .duration, .formula, .lookup].contains(self) }
+    /// Whether values can be held between a minimum and a maximum.
+    var canHaveRange: Bool { [.number, .duration, .progress, .rating, .formula, .rollup].contains(self) }
+    /// Whether dates can be kept out of the future or the past.
+    var canLimitDates: Bool { self == .date }
+    /// Whether text can be required to match a pattern.
+    var canHavePattern: Bool { isTextLike }
     /// Types grouped for the "Add Field" menu.
     static let groups: [[FieldType]] = [
         [.text, .longText, .number, .duration, .date, .checkbox],

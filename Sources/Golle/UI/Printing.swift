@@ -101,7 +101,8 @@ enum Printing {
         operation.jobTitle = title
         operation.showsPrintPanel = true
         operation.showsProgressPanel = true
-        if let window = NSApp.keyWindow {
+        // The document window, not a sheet that is closing.
+        if let window = NSApp.mainWindow ?? NSApp.keyWindow {
             operation.runModal(for: window, delegate: nil, didRun: nil, contextInfo: nil)
         } else {
             operation.run()

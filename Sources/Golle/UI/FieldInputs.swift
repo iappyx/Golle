@@ -37,11 +37,71 @@ struct DurationInput: View {
             if value != nil { value = nil }
         } else if let seconds = Value.parseDuration(text, field.options.durationStyle) {
             if value?.number != seconds { value = .number(seconds) }
+            // From what was just saved: the binding can still give the value from before.
+            draft = Value.formatDuration(seconds, field.options.durationStyle)
+            return
         }
         draft = shown
     }
 }
 
+
+/// A number, typed plainly ("1234.5", "1.234,5", "€ 12"). Saved when editing ends (Return, Tab,
+/// clicking away, another record shown); text that isn't a number is put back.
+struct NumberInput: View {
+    let field: Field
+    @Binding var value: Value?
+    @State private var draft = ""
+    @FocusState private var focused: Bool
+
+    private var shown: String { value?.number.map(Value.plain) ?? "" }
+
+    var body: some View {
+        TextField(field.name, text: $draft)
+            .labelsHidden()
+            .multilineTextAlignment(.trailing)
+            .monospacedDigit()
+            .focused($focused)
+            .onSubmit(save)
+            .onAppear { draft = shown }
+            .onChange(of: value) { _, _ in if !focused { draft = shown } }
+            .onChange(of: focused) { _, now in if !now { save() } }
+            .onDisappear { if focused { save() } }
+    }
+
+    private func save() {
+        let text = draft.trimmingCharacters(in: .whitespaces)
+        if text.isEmpty {
+            if value != nil { value = nil }
+            draft = ""
+        } else if let n = Value.parseNumber(text) {
+            if value?.number != n { value = .number(n) }
+            draft = Value.plain(n)
+        } else {
+            NSSound.beep()
+            draft = shown
+        }
+    }
+}
+
+/// Text cleaned as it is stored (a barcode loses its spaces and dashes), while what is typed stays
+/// as typed: cleaning the field's own text on every key would move the cursor to the end.
+struct CleanedText<Content: View>: View {
+    let stored: String
+    let save: (String) -> Void
+    let clean: (String) -> String
+    @ViewBuilder let content: (Binding<String>) -> Content
+    @State private var draft: String?
+
+    var body: some View {
+        content(Binding(get: { draft ?? stored }, set: { new in
+            draft = new
+            save(new)
+        }))
+        // Changed elsewhere (undo, a scan): show that.
+        .onChange(of: stored) { _, new in if let draft, clean(draft) != new { self.draft = nil } }
+    }
+}
 
 /// A percentage from 0 to 100: a slider and the number.
 struct ProgressInput: View {

@@ -299,6 +299,20 @@ enum Formula {
                 if condition.truthy { return evaluate(args[1], context: context) }
                 return args.count == 3 ? evaluate(args[2], context: context) : .empty
             }
+            // SWITCH(value, match, result, …, otherwise) also evaluates only the result it picks.
+            if name == "SWITCH" {
+                guard args.count >= 3 else { return .error("SWITCH needs a value, then pairs of a match and a result, and optionally a result for anything else") }
+                let value = evaluate(args[0], context: context)
+                if case .error = value { return value }
+                var i = 1
+                while i + 1 < args.count {
+                    let match = evaluate(args[i], context: context)
+                    if case .error = match { return match }
+                    if case .bool(true) = binary("=", value, match) { return evaluate(args[i + 1], context: context) }
+                    i += 2
+                }
+                return i < args.count ? evaluate(args[i], context: context) : .empty
+            }
             if name == "LOOKUP" {
                 guard args.count == 2, case .field(let linkName) = args[0] else { return .error("LOOKUP needs a link field and a field name: LOOKUP({Link}, \"Field\")") }
                 let fieldName = evaluate(args[1], context: context).string
@@ -512,6 +526,33 @@ enum Formula {
                 guard args.count == 2 else { return .error("CONTAINS needs text and what to look for") }
                 return .bool(args[0].string.range(of: args[1].string, options: [.caseInsensitive, .diacriticInsensitive]) != nil)
             },
+            "MID": { args in
+                guard args.count == 3, let s = args[1].number, let n = args[2].number else { return .error("MID needs text, a start position and a length: MID(\"Golle\", 2, 3)") }
+                guard let start = Formula.int(s), let count = Formula.int(n), start >= 1, count >= 0 else { return .error("MID counts from 1, with a length of 0 or more") }
+                return .text(String(args[0].string.dropFirst(start - 1).prefix(count)))
+            },
+            "FIND": { args in
+                // Where the text is found, counting from 1; 0 when it isn't. Like CONTAINS, case and
+                // accents don't matter.
+                guard args.count == 2 else { return .error("FIND needs what to look for and the text to look in: FIND(\"-\", {Code})") }
+                let text = args[1].string
+                guard let range = text.range(of: args[0].string, options: [.caseInsensitive, .diacriticInsensitive]) else { return .number(0) }
+                return .number(Double(text.distance(from: text.startIndex, to: range.lowerBound) + 1))
+            },
+            "SUBSTITUTE": { args in
+                guard args.count == 3 else { return .error("SUBSTITUTE needs text, what to replace and what to put instead") }
+                let old = args[1].string
+                return .text(old.isEmpty ? args[0].string : args[0].string.replacingOccurrences(of: old, with: args[2].string))
+            },
+            "FORMATDATE": { args in
+                guard (1...2).contains(args.count) else { return .error("FORMATDATE needs a date and optionally a pattern: FORMATDATE({Date}, \"d MMMM yyyy\")") }
+                guard case .date(let d) = args[0] else { return args[0] == .empty ? .empty : .error("FORMATDATE needs a date") }
+                guard args.count == 2 else { return .text(d.formatted(date: .abbreviated, time: .omitted)) }
+                let formatter = DateFormatter()
+                formatter.locale = .current
+                formatter.dateFormat = args[1].string
+                return .text(formatter.string(from: d))
+            },
             "CONCAT": { args in .text(args.map(\.string).joined()) },
             "JOIN": { args in
                 guard (1...2).contains(args.count) else { return .error("JOIN needs a list and optionally a separator") }
@@ -544,6 +585,7 @@ enum Formula {
             // Handled in `evaluate`, listed here so the parser knows them.
             "IF": { _ in .empty },
             "LOOKUP": { _ in .empty },
+            "SWITCH": { _ in .empty },
         ]
     }()
 
@@ -554,12 +596,15 @@ enum Formula {
         ("&", "join text: {First} & \" \" & {Last}"),
         ("= <> < > <= >=", "compare"),
         ("IF(test, then, else)", "choose a result"),
+        ("SWITCH(value, match, result, …, else)", "pick the result for the value that matches"),
         ("AND, OR, NOT, ISBLANK", "logic"),
         ("SUM, AVG, MIN, MAX, COUNT", "totals; work on lists too"),
         ("ROUND(x, places), FLOOR, CEILING, ABS, SQRT, MOD", "numbers"),
         ("LEN, UPPER, LOWER, TRIM, LEFT, RIGHT, CONTAINS, CONCAT", "text"),
+        ("MID(text, start, length), FIND(what, text), SUBSTITUTE(text, old, new)", "parts of text; FIND gives 0 when not found"),
         ("TODAY(), NOW(), YEAR, MONTH, DAY, WEEKDAY", "dates"),
         ("DATE(y, m, d), DAYS(end, start), ADDDAYS(date, n)", "date maths"),
+        ("FORMATDATE(date, \"d MMMM yyyy\")", "a date as text: d day, MMM(M) month, yyyy year, EEEE weekday"),
         ("LOOKUP({Link}, \"Field\")", "a field of every linked record, as a list"),
         ("JOIN(list, \", \")", "a list as text"),
     ]

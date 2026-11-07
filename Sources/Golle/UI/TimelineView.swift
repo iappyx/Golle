@@ -219,7 +219,16 @@ struct TimelineView: View {
         }
         // Once the insets are known.
         .onAppear { DispatchQueue.main.async { scrollToToday(range) } }
-        .onChange(of: range) { _, range in scrollToToday(range) }
+        // A new scale shows today again. Otherwise (a bar moved past the edge, a date changed)
+        // only while not scrolled by hand; scrolled, what is in view stays in view.
+        .onChange(of: RangeKey(range: range, scale: view.timelineScale)) { old, new in
+            if old.scale != new.scale || scroll.untouched {
+                scrollToToday(new.range)
+            } else if old.range.lowerBound != new.range.lowerBound {
+                let shift = CGFloat(days(from: new.range.lowerBound, to: old.range.lowerBound)) * dayWidth
+                position.scrollTo(x: max(0, scroll.x + shift) - scroll.inset)
+            }
+        }
     }
 
     @ViewBuilder
@@ -275,7 +284,8 @@ struct TimelineView: View {
                 .overlay { if selected { RoundedRectangle(cornerRadius: 5).strokeBorder(color, lineWidth: 1.5) } }
             if resizable {
                 // The right edge: drag to change the end date.
-                Rectangle().fill(Color.white.opacity(0.001)).frame(width: 8)
+                // At most a quarter of the bar: a short bar can still be moved.
+                Rectangle().fill(Color.white.opacity(0.001)).frame(width: min(8, w / 4))
                     .pointerStyle(.frameResize(position: .trailing))
                     .gesture(dragGesture(item, resizing: true, start: start, end: end))
             }
@@ -319,6 +329,11 @@ struct TimelineView: View {
                     document.shiftDates(record: item.record.id, table: table.id, start: start.id, end: end?.id, moveStart: !resizing, byDays: days)
                 }
             }
+    }
+
+    struct RangeKey: Equatable {
+        let range: ClosedRange<Date>
+        let scale: TimelineScale
     }
 
     /// "5 Mar" or "5 – 12 Mar 2026".

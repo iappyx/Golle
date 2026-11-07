@@ -83,6 +83,14 @@ struct ChoiceCell: View {
 struct ChecklistEditor: View {
     @Binding var value: Value?
     @State private var newItem = ""
+    @FocusState private var addingFocused: Bool
+
+    private func addItem() {
+        let text = newItem.trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty else { return }
+        update(items + [CheckItem(text: text)])
+        newItem = ""
+    }
 
     private var items: [CheckItem] { value?.checkItems ?? [] }
 
@@ -122,12 +130,11 @@ struct ChecklistEditor: View {
                 Image(systemName: "plus.circle").foregroundStyle(.secondary)
                 TextField("Add an item", text: $newItem)
                     .textFieldStyle(.plain)
-                    .onSubmit {
-                        let text = newItem.trimmingCharacters(in: .whitespaces)
-                        guard !text.isEmpty else { return }
-                        update(items + [CheckItem(text: text)])
-                        newItem = ""
-                    }
+                    .focused($addingFocused)
+                    .onSubmit(addItem)
+                    // Typed but not added with Return: added when the field is left, too.
+                    .onChange(of: addingFocused) { _, now in if !now { addItem() } }
+                    .onDisappear(perform: addItem)
             }
         }
     }

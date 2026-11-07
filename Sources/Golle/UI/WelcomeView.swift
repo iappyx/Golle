@@ -16,10 +16,8 @@ struct WelcomeView: View {
                 Spacer().frame(height: 6)
                 VStack(alignment: .leading, spacing: 8) {
                     action("New Database", "plus.rectangle.on.rectangle") { WelcomeController.newDocument(nil) }
-                    action("Open…", "folder") {
-                        WelcomeController.close()
-                        NSDocumentController.shared.openDocument(nil)
-                    }
+                    // The welcome window closes once a database opens: cancelled, it stays.
+                    action("Open…", "folder") { NSDocumentController.shared.openDocument(nil) }
                 }
                 Spacer()
             }
@@ -174,6 +172,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Light or dark as chosen in Settings, from the start (not only once Settings is opened).
+        AppSettings.apply(Preferences.store.string(forKey: Preferences.Key.appearance) ?? "system")
         // After SwiftUI has restored documents or put up its launch panel.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { MainActor.assumeIsolated { WelcomeController.launch() } }
     }

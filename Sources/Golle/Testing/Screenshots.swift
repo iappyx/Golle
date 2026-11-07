@@ -26,6 +26,16 @@ enum Screenshots {
         var shots: [(String, GolleDocument, (GolleDocument) -> Void)] = []
         shots.append(("1-table", demo(), { doc in doc.selectedRecordIDs = [doc.currentTable!.records[0].id] }))
         shots.append(("2-gallery", demo(), { doc in doc.updateCurrentView { $0.mode = .gallery } }))
+        shots.append(("31-summary", demo(), { doc in
+            let albums = doc.currentTable!
+            doc.updateCurrentView { view in
+                view.mode = .summary
+                view.summary.rowFieldID = albums.field(named: "Genre")?.id
+                view.summary.columnFieldID = albums.field(named: "Format")?.id
+                view.summary.measure = .sum
+                view.summary.valueFieldID = albums.field(named: "Price Paid")?.id
+            }
+        }))
         shots.append(("22-artists", demo(), { doc in doc.selectedTableID = doc.database.tables[1].id }))
         shots.append(("3-form", demo(), { doc in
             doc.updateCurrentView { $0.mode = .layout }
@@ -118,6 +128,15 @@ enum Screenshots {
             ("20-record-form", CGSize(width: 420, height: 900), { (d: GolleDocument) in
                 let t = d.currentTable!
                 return AnyView(RecordForm(document: d, table: t, record: t.records[0], resolver: d.resolver(for: t)))
+            }),
+            ("30-related", CGSize(width: 420, height: 640), { (d: GolleDocument) in
+                // An artist with their albums underneath, edited in place.
+                let artists = d.database.tables[1]
+                let artist = artists.records.max { a, b in
+                    d.database.tables[0].records.filter { $0.values.values.contains { $0.links.contains(a.id) } }.count
+                        < d.database.tables[0].records.filter { $0.values.values.contains { $0.links.contains(b.id) } }.count
+                }!
+                return AnyView(RecordForm(document: d, table: artists, record: artist, resolver: d.resolver(for: artists)))
             }),
         ] as [(String, CGSize, (GolleDocument) -> AnyView)] {
             let document = demo()

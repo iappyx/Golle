@@ -20,9 +20,16 @@ struct SavedView: Codable, Equatable, Hashable, Identifiable {
     var locationFieldID: Field.ID?
     /// Fields hidden in this view (table columns and card lines).
     var hiddenFieldIDs: [Field.ID] = []
-    /// Column order and widths of the table, as SwiftUI saves them.
+    /// Column order and widths of the table as an older Golle saved them (SwiftUI's own format);
+    /// kept so the file reads back the same, no longer used.
     var columnData: Data?
+    /// The table's column order: fields not in it follow in table order.
+    var columnOrder: [Field.ID] = []
+    /// The table's column widths, by field id.
+    var columnWidths: [String: Double] = [:]
     var chart = ChartSettings()
+    /// The summary table: rows and columns by fields, counts or totals in the cells.
+    var summary = PivotSettings()
     /// The timeline: bars from the date field (`dateFieldID`, shared with the calendar) to this one.
     var endDateFieldID: Field.ID?
     var timelineScale = TimelineScale.week
@@ -52,7 +59,10 @@ struct SavedView: Codable, Equatable, Hashable, Identifiable {
         locationFieldID = try c.decodeIfPresent(UUID.self, forKey: .locationFieldID)
         hiddenFieldIDs = try c.decodeIfPresent([UUID].self, forKey: .hiddenFieldIDs) ?? []
         columnData = try c.decodeIfPresent(Data.self, forKey: .columnData)
+        columnOrder = try c.decodeIfPresent([UUID].self, forKey: .columnOrder) ?? []
+        columnWidths = try c.decodeIfPresent([String: Double].self, forKey: .columnWidths) ?? [:]
         chart = (try? c.decodeIfPresent(ChartSettings.self, forKey: .chart)) ?? ChartSettings()
+        summary = (try? c.decodeIfPresent(PivotSettings.self, forKey: .summary)) ?? PivotSettings()
         endDateFieldID = try c.decodeIfPresent(UUID.self, forKey: .endDateFieldID)
         timelineScale = (try? c.decodeIfPresent(TimelineScale.self, forKey: .timelineScale)) ?? .week
     }
@@ -68,6 +78,21 @@ struct SavedView: Codable, Equatable, Hashable, Identifiable {
         let hidden = Set(hiddenFieldIDs)
         let fields = table.fields.filter { !hidden.contains($0.id) }
         return fields.isEmpty ? Array(table.fields.prefix(1)) : fields
+    }
+
+    /// The table's columns: the visible fields in the order arranged in this view; fields not
+    /// arranged yet (new ones) come after, in table order.
+    func columns(_ table: DataTable) -> [Field] {
+        let fields = visibleFields(table)
+        let rank = Dictionary(columnOrder.enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a })
+        return fields.enumerated().sorted { a, b in
+            switch (rank[a.element.id], rank[b.element.id]) {
+            case let (x?, y?): x < y
+            case (_?, nil): true
+            case (nil, _?): false
+            case (nil, nil): a.offset < b.offset
+            }
+        }.map(\.element)
     }
 
     /// The board's field: the chosen one, else the first single-choice field.
@@ -111,8 +136,23 @@ enum TimelineScale: String, Codable, CaseIterable, Identifiable {
 }
 
 enum ViewMode: String, Codable, CaseIterable, Identifiable {
-    case table, gallery, layout, board, calendar, map, chart, timeline
+    case table, gallery, layout, board, calendar, map, chart, timeline, summary
     var id: String { rawValue }
+    /// What the view shows, for its toolbar button's tooltip.
+    var hint: String {
+        switch self {
+        case .table: "Table: records as rows, edited in place"
+        case .gallery: "Gallery: records as cards, with the first image as a cover"
+        case .layout: "Form: one record at a time, on a layout you design"
+        case .board: "Board: a column per option of a choice field"
+        case .calendar: "Calendar: records on a month grid by a date field"
+        case .timeline: "Timeline: bars from a start to an end date"
+        case .summary: "Summary: records counted or added up by two fields, with totals"
+        case .map: "Map: records with a location as pins"
+        case .chart: "Chart: records counted, summed or averaged"
+        }
+    }
+
     var label: String {
         switch self {
         case .table: "Table"
@@ -121,6 +161,7 @@ enum ViewMode: String, Codable, CaseIterable, Identifiable {
         case .board: "Board"
         case .calendar: "Calendar"
         case .timeline: "Timeline"
+        case .summary: "Summary"
         case .map: "Map"
         case .chart: "Chart"
         }
@@ -133,6 +174,7 @@ enum ViewMode: String, Codable, CaseIterable, Identifiable {
         case .board: "rectangle.split.3x1"
         case .calendar: "calendar"
         case .timeline: "calendar.day.timeline.left"
+        case .summary: "sum"
         case .map: "map"
         case .chart: "chart.bar.xaxis"
         }

@@ -8,6 +8,7 @@ struct BoardView: View {
     let rows: [Record]
     let resolver: Resolver
     let editFields: () -> Void
+    var open: (Record.ID) -> Void = { _ in }
 
     var body: some View {
         if let field = view.boardField(in: table) {
@@ -30,7 +31,7 @@ struct BoardView: View {
                         ForEach(columns(field), id: \.self) { choice in
                             BoardColumn(document: document, table: table, field: field, choice: choice,
                                         records: rows.filter { ($0[field.id]?.choices.first ?? "") == choice }, resolver: resolver,
-                                        visible: view.visibleFields(table))
+                                        visible: view.visibleFields(table), open: open)
                         }
                     }
                     .padding(12)
@@ -64,6 +65,7 @@ private struct BoardColumn: View {
     let records: [Record]
     let resolver: Resolver
     var visible: [Field] = []
+    var open: (Record.ID) -> Void = { _ in }
     @State private var targeted = false
 
     var body: some View {
@@ -86,7 +88,7 @@ private struct BoardColumn: View {
             ScrollView {
                 LazyVStack(spacing: 8) {
                     ForEach(records) { record in
-                        BoardCard(document: document, table: table, record: record, resolver: resolver, skip: field.id, visible: visible)
+                        BoardCard(document: document, table: table, record: record, resolver: resolver, skip: field.id, visible: visible, open: open)
                     }
                 }
                 .padding(.bottom, 8)
@@ -113,6 +115,7 @@ struct BoardCard: View {
     let resolver: Resolver
     var skip: Field.ID?
     var visible: [Field] = []
+    var open: (Record.ID) -> Void = { _ in }
 
     private var details: [Field] {
         Array((visible.isEmpty ? table.fields : visible).filter {
@@ -148,13 +151,22 @@ struct BoardCard: View {
         .clipShape(.rect(cornerRadius: 6))
         .overlay { RoundedRectangle(cornerRadius: 6).strokeBorder(selected ? Color.accentColor : Color.secondary.opacity(0.2), lineWidth: selected ? 2 : 1) }
         .contentShape(.rect)
-        .onTapGesture { document.selectedRecordIDs = [record.id] }
+        // A double-click opens the record in the inspector; ⌘-click adds to the selection.
+        .gesture(
+            TapGesture(count: 2).onEnded { open(record.id) }
+                .exclusively(before: TapGesture().modifiers(.command).onEnded {
+                    if document.selectedRecordIDs.contains(record.id) { document.selectedRecordIDs.remove(record.id) } else { document.selectedRecordIDs.insert(record.id) }
+                })
+                .exclusively(before: TapGesture().onEnded { document.selectedRecordIDs = [record.id] })
+        )
         .draggable(record.id.uuidString) {
             Text(table.title(of: record)).padding(6).background(.background, in: .rect(cornerRadius: 6))
         }
         .contextMenu {
-            Button("Duplicate") { document.duplicateRecords([record.id], in: table.id) }
-            Button("Delete", role: .destructive) { document.deleteRecords([record.id], from: table.id) }
+            // The selected cards when this one is among them, else this one.
+            let targets = document.selectedRecordIDs.contains(record.id) ? document.selectedRecordIDs : [record.id]
+            Button(targets.count == 1 ? "Duplicate" : "Duplicate \(targets.count)") { document.duplicateRecords(targets, in: table.id) }
+            Button(targets.count == 1 ? "Delete" : "Delete \(targets.count)", role: .destructive) { document.deleteRecords(targets, from: table.id) }
         }
     }
 }

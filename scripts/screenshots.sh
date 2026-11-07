@@ -17,7 +17,7 @@ OUT=docs/screenshots
 mkdir -p "$OUT"
 for pair in 1-table:table 11-gallery-grouped:gallery 3-form:form 8-board:board 9-calendar:calendar \
             10-map:map 14-chart:chart 16-dashboard:dashboard 26-timeline-grouped:timeline 28-report:report \
-            27-rules:rules; do
+            27-rules:rules 31-summary:summary; do
   cp "$TMP/${pair%%:*}.png" "$OUT/${pair##*:}.png"
 done
 echo "Updated $OUT"

@@ -87,7 +87,6 @@ struct FindReplaceSheet: View {
                     document.replaceText(currentMatches(), in: tableID)
                     dismiss()
                 }
-                .keyboardShortcut(.defaultAction)
                 .disabled(find.isEmpty || matches.isEmpty && searched == search)
             }
             .padding(12)

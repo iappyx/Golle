@@ -9,6 +9,8 @@ struct DocumentView: View {
 
     @State private var search = ""
     @State private var showInspector = true
+    /// The card views (gallery, board, calendar, timeline) have the keyboard, for Delete.
+    @FocusState private var cardsFocused: Bool
     @State private var showFilter = false
     @State private var sheet: Sheet?
     @State private var prompt: NamePrompt?
@@ -140,6 +142,22 @@ struct DocumentView: View {
                 }
                 content(table: table, view: view, rows: rows, resolver: resolver)
                     .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
+                    // The card views take the keyboard when a card is clicked (a tap doesn't move it
+                    // there), so Delete deletes the selected records. Not while typing elsewhere.
+                    .focusable(Self.cardModes.contains(view.mode))
+                    .focusEffectDisabled()
+                    .focused($cardsFocused)
+                    .onDeleteCommand {
+                        guard Self.cardModes.contains(view.mode) else { return }
+                        document.deleteRecords(document.selectedRecordIDs, from: table.id)
+                    }
+                    .onChange(of: document.selectedRecordIDs) { _, ids in
+                        guard Self.cardModes.contains(document.currentView.mode), !ids.isEmpty else { return }
+                        let responder = NSApp.keyWindow?.firstResponder
+                        if !(responder is NSText || responder is NSTextField) { cardsFocused = true }
+                    }
+                    // A filter shown keeps its bar, also when its last rule is removed mid-click.
+                    .onChange(of: view.filter.isEmpty, initial: true) { _, empty in if !empty { showFilter = true } }
                 Divider()
                 SummaryBar(document: document, table: table, rows: rows, resolver: resolver)
             }
@@ -179,23 +197,16 @@ struct DocumentView: View {
         } else {
             switch view.mode {
             case .table:
-                RecordTable(document: document, table: table, rows: rows, resolver: resolver,
-                            groupFields: view.groupBy.compactMap(table.field),
-                            fields: view.visibleFields(table),
-                            sort: Binding(get: { view.sort }, set: { keys in document.updateCurrentView("Sort") { $0.sort = keys } }),
-                            columns: Binding(
-                                get: { view.columnData.flatMap { try? JSONDecoder().decode(TableColumnCustomization<RecordTable.Row>.self, from: $0) } ?? TableColumnCustomization() },
-                                set: { columns in
-                                    let data = try? JSONEncoder().encode(columns)
-                                    if data != view.columnData { document.updateCurrentView("Arrange Columns") { $0.columnData = data } }
-                                }))
+                RecordGrid(document: document, table: table, view: view, rows: rows, resolver: resolver)
+                    .id(table.id)
                     .overlay { emptyOverlay(table: table, rows: rows) }
             case .gallery:
                 GalleryView(document: document, table: table, rows: rows, resolver: resolver, groupFields: view.groupBy.compactMap(table.field),
-                            visible: view.visibleFields(table))
+                            visible: view.visibleFields(table), open: { open($0) })
                     .overlay { emptyOverlay(table: table, rows: rows) }
             case .board:
-                BoardView(document: document, table: table, view: view, rows: rows, resolver: resolver, editFields: { sheet = .fields })
+                BoardView(document: document, table: table, view: view, rows: rows, resolver: resolver, editFields: { sheet = .fields },
+                          open: { open($0) })
             case .calendar:
                 CalendarView(document: document, table: table, view: view, rows: rows, resolver: resolver, editFields: { sheet = .fields })
             case .map:
@@ -203,6 +214,8 @@ struct DocumentView: View {
             case .timeline:
                 TimelineView(document: document, table: table, view: view, rows: rows, resolver: resolver, editFields: { sheet = .fields })
                     .id(view.id)
+            case .summary:
+                PivotView(document: document, table: table, view: view, rows: rows, resolver: resolver)
             case .chart:
                 ChartModeView(document: document, table: table, view: view, rows: rows, resolver: resolver)
             case .layout:
@@ -248,18 +261,22 @@ struct DocumentView: View {
 
     @ToolbarContentBuilder
     private func toolbar(table: DataTable, view: SavedView) -> some ToolbarContent {
-        ToolbarItem(placement: .principal) {
-            Picker("View", selection: Binding(get: { view.mode }, set: { mode in document.updateCurrentView("Change View") { $0.mode = mode } })) {
-                ForEach(ViewMode.allCases) { mode in
-                    Label(mode.label, systemImage: mode.symbol).tag(mode)
+        // A button per view, so each has its own tooltip (the segments of a segmented picker share
+        // one); the toolbar joins them into one group.
+        ToolbarItemGroup(placement: .principal) {
+            ForEach(Array(ViewMode.allCases.enumerated()), id: \.element) { index, mode in
+                Toggle(isOn: Binding(get: { view.mode == mode }, set: { on in
+                    if on, view.mode != mode { document.updateCurrentView("Change View") { $0.mode = mode } }
+                })) {
+                    Label(mode.label, systemImage: mode.symbol)
                 }
+                .toggleStyle(.button)
+                .labelStyle(.iconOnly)
+                .help("\(mode.hint) (⌘\(index + 1))")
             }
-            .pickerStyle(.segmented)
-            .labelStyle(.iconOnly)
-            .help("Show records as a table, a gallery or a form")
         }
         ToolbarItemGroup(placement: .primaryAction) {
-            Button { document.addRecord(to: table.id) } label: { Label("New Record", systemImage: "plus") }
+            Button { addRecord(table: table, view: view) } label: { Label("New Record", systemImage: "plus") }
                 .help("New Record (⇧⌘N)")
             fieldsMenu(table: table, view: view)
             groupMenu(table: table, view: view)
@@ -277,6 +294,23 @@ struct DocumentView: View {
     }
 
     /// Which fields this view shows: table columns and the lines on cards.
+    static let cardModes: Set<ViewMode> = [.gallery, .board, .calendar, .timeline]
+
+    /// A record opened from a card (double-click): selected and shown in the inspector.
+    private func open(_ id: Record.ID) {
+        document.selectedRecordIDs = [id]
+        showInspector = true
+    }
+
+    /// A new record; in the calendar and the timeline on today, so it shows there.
+    private func addRecord(table: DataTable, view: SavedView) {
+        if view.mode == .calendar || view.mode == .timeline, let date = view.dateField(in: table), date.type == .date {
+            document.addRecord(to: table.id, values: [date.id: .date(Calendar.current.startOfDay(for: Date()))])
+        } else {
+            document.addRecord(to: table.id)
+        }
+    }
+
     private func fieldsMenu(table: DataTable, view: SavedView) -> some View {
         Menu {
             ForEach(table.fields) { field in
@@ -297,6 +331,8 @@ struct DocumentView: View {
             Label("Show Fields", systemImage: view.hiddenFieldIDs.isEmpty ? "eye" : "eye.slash")
         }
         .help(view.hiddenFieldIDs.isEmpty ? "Choose which fields this view shows" : "\(view.hiddenFieldIDs.count) hidden in this view")
+        // The calendar, map and chart show one field each, chosen in the view itself.
+        .disabled([.calendar, .map, .chart, .summary].contains(view.mode))
     }
 
     /// Group by up to two fields. Shown for the table, gallery and timeline.
@@ -368,7 +404,8 @@ struct DocumentView: View {
     private var actions: DocumentActions {
         DocumentActions(
             editFields: { sheet = .fields },
-            toggleFilter: { showFilter.toggle() },
+            // As the toolbar button: an active filter's bar stays, so this shows it rather than toggling.
+            toggleFilter: { if document.currentView.filter.isEmpty { showFilter.toggle() } else { showFilter = true } },
             toggleInspector: { showInspector.toggle() },
             saveView: { askToSaveView() },
             importFile: { url in sheet = .importFile(url) },
@@ -379,10 +416,17 @@ struct DocumentView: View {
             labels: { sheet = .labels },
             findReplace: { sheet = .findReplace },
             report: { sheet = .report },
+            fillDown: {
+                // The selected block's columns, from its top row down.
+                guard let table = document.currentTable, let block = document.cellBlock, block.table == table.id,
+                      block.records.count > 1 else { NSSound.beep(); return }
+                document.fillDown(fields: block.fields, records: block.records, table: table.id)
+            },
             visibleRecords: {
                 guard let table = document.currentTable else { return [] }
                 return visibleRows(document.resolver(for: table), view: document.currentView)
-            }
+            },
+            sheetOpen: sheet != nil
         )
     }
 
@@ -416,7 +460,10 @@ struct DocumentActions {
     var labels: () -> Void
     var findReplace: () -> Void
     var report: () -> Void
+    var fillDown: () -> Void
     var visibleRecords: () -> [Record]
+    /// A sheet is open: commands that open another one (or print) wait until it is closed.
+    var sheetOpen = false
 }
 
 struct DocumentActionsKey: FocusedValueKey { typealias Value = DocumentActions }
@@ -467,6 +514,8 @@ private struct Sidebar: View {
                 return document.selectedViewID.map { .view(table, $0) } ?? .table(table)
             },
             set: { item in
+                // A click on empty sidebar space selects nothing: stay where we are.
+                guard let item else { return }
                 document.showsDashboard = item == .dashboard
                 switch item {
                 case .dashboard: break

@@ -86,8 +86,11 @@ struct DatabaseSettingsSheet: View {
             Divider()
             HStack {
                 Spacer()
+                // Not while a new password is being typed: it would be dropped without a word.
                 Button("Done") { dismiss() }
                     .keyboardShortcut(settingPassword ? nil : .defaultAction)
+                    .disabled(settingPassword)
+                    .help(settingPassword ? "Set or cancel the password first" : "")
             }
             .padding(12)
         }
@@ -131,7 +134,6 @@ struct UnlockView: View {
                 .textFieldStyle(.roundedBorder)
                 .frame(width: 240)
                 .focused($focused)
-                .onSubmit(unlock)
             if let error {
                 Text(error).foregroundStyle(.red)
             }
@@ -142,7 +144,9 @@ struct UnlockView: View {
                 if document.rememberedForTouchID {
                     Button { touchID() } label: { Label("Use Touch ID", systemImage: "touchid") }
                 }
+                // Return is this button (an onSubmit as well would try the password twice).
                 Button("Unlock", action: unlock).keyboardShortcut(.defaultAction)
+                    .disabled(password.isEmpty)
             }
         }
         .padding(40)

@@ -266,11 +266,30 @@ final class Resolver {
         case missing
         /// The number of other records with the same value.
         case duplicate(Int)
+        /// Below the minimum or above the maximum, as shown ("Below 0").
+        case outOfRange(String)
+        case wrongDate(DateLimit)
+        /// Doesn't match the pattern; its name.
+        case noMatch(String)
 
         var message: String {
             switch self {
             case .missing: "Required"
             case .duplicate(let n): n == 1 ? "Same as another record" : "Same as \(n) other records"
+            case .outOfRange(let text): text
+            case .wrongDate(let limit): limit == .notFuture ? "In the future" : "In the past"
+            case .noMatch(let name): "Not: \(name.lowercased())"
+            }
+        }
+
+        /// A sentence for the record form: "Price is below 0".
+        func sentence(_ field: Field) -> String {
+            switch self {
+            case .missing: "\(field.name) is required"
+            case .duplicate: "\(field.name) is the same as in another record"
+            case .outOfRange(let text): "\(field.name) is \(text.prefix(1).lowercased() + text.dropFirst())"
+            case .wrongDate(let limit): "\(field.name) is \(limit == .notFuture ? "in the future" : "in the past")"
+            case .noMatch(let name): "\(field.name) doesn't match: \(name.lowercased())"
             }
         }
     }
@@ -293,7 +312,7 @@ final class Resolver {
     /// Which rule of the field the record breaks, if any.
     func ruleProblem(_ record: Record, _ field: Field) -> RuleProblem? {
         let options = field.options
-        guard options.required || options.unique else { return nil }
+        guard Self.hasRules(field) else { return nil }
         if options.required, field.type.canBeRequired {
             // Links to records that were deleted don't count.
             if field.type == .link {
@@ -301,6 +320,7 @@ final class Resolver {
             } else if let value = self.value(record, field), !value.isEmpty {
             } else { return .missing }
         }
+        if let problem = valueProblem(record, field) { return problem }
         if options.unique, field.type.canBeUnique, let key = uniqueKey(record, field) {
             let counts: [String: Int]
             if let known = shared.valueCounts[field.id] { counts = known } else {
@@ -311,6 +331,38 @@ final class Resolver {
             }
             let n = (counts[key] ?? 1) - 1
             if n > 0 { return .duplicate(n) }
+        }
+        return nil
+    }
+
+    /// A broken value rule: a number out of range, a date on the wrong side of today, text that
+    /// doesn't match the pattern. Empty cells break none of these (Required is for that).
+    func valueProblem(_ record: Record, _ field: Field) -> RuleProblem? {
+        let options = field.options
+        if field.type.canHaveRange, options.minimum != nil || options.maximum != nil {
+            let n: Double? = switch value(record, field) {
+            case .number(let n)?: n
+            case .rating(let r)?: Double(r)
+            default: nil
+            }
+            if let n {
+                let shown = formatField(field)
+                func text(_ x: Double) -> String { Value.number(x).display(for: shown) }
+                if let min = options.minimum, n < min { return .outOfRange("Below \(text(min))") }
+                if let max = options.maximum, n > max { return .outOfRange("Above \(text(max))") }
+            }
+        }
+        if field.type.canLimitDates, let limit = options.dateLimit, let date = value(record, field)?.date {
+            let calendar = Calendar.current
+            let day = calendar.startOfDay(for: date), today = calendar.startOfDay(for: Date())
+            if limit == .notFuture, day > today { return .wrongDate(limit) }
+            if limit == .notPast, day < today { return .wrongDate(limit) }
+        }
+        if field.type.canHavePattern, let pattern = options.pattern, TextPattern.isValid(pattern) {
+            let text = self.text(record, field).trimmingCharacters(in: .whitespaces)
+            if !text.isEmpty, text.range(of: pattern, options: .regularExpression) == nil {
+                return .noMatch(options.patternName ?? "the pattern")
+            }
         }
         return nil
     }
@@ -328,7 +380,15 @@ final class Resolver {
 
     /// Whether the table has any rules at all (so views can skip the checks).
     var hasRules: Bool {
-        table.fields.contains { ($0.options.required && $0.type.canBeRequired) || ($0.options.unique && $0.type.canBeUnique) }
+        table.fields.contains { Self.hasRules($0) }
+    }
+
+    static func hasRules(_ field: Field) -> Bool {
+        let o = field.options, t = field.type
+        return (o.required && t.canBeRequired) || (o.unique && t.canBeUnique)
+            || (t.canHaveRange && (o.minimum != nil || o.maximum != nil))
+            || (t.canLimitDates && o.dateLimit != nil)
+            || (t.canHavePattern && o.pattern.map(TextPattern.isValid) == true)
     }
 
     /// The records a rollup works over, and their table: through one of this table's link fields,
